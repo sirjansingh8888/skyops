@@ -26,7 +26,7 @@ def _detect_cached(name: str, conf: float, imgsz: int) -> tuple:
 
 
 def analyze_frame(name: str | None = None, use_gt: bool = False, tilt_deg: float = DEFAULT_TILT_DEG,
-                  hfov_deg: float = DEFAULT_HFOV_DEG, conf: float = 0.15, imgsz: int = 1280,
+                  hfov_deg: float = DEFAULT_HFOV_DEG, conf: float | None = None, imgsz: int = 1280,
                   origin: tuple[float, float] | None = None) -> dict:
     """Detections (model or dataset ground truth) with geo-projection and landing-zone score.
 
@@ -39,7 +39,7 @@ def analyze_frame(name: str | None = None, use_gt: bool = False, tilt_deg: float
     if use_gt:
         dets, source = list(rec["gt"]), "ground-truth"
     else:
-        dets, source = [dict(d) for d in _detect_cached(name, conf, imgsz)], get_detector().kind
+        dets, source = [dict(d) for d in _detect_cached(name, conf or get_detector().conf, imgsz)], get_detector().kind
     lat0, lon0 = origin if origin else (tel["lat"], tel["lon"])
     proj = GroundProjector(rec["width"], rec["height"], tel["alt_m"], tel["yaw_deg"], tilt_deg=tilt_deg, hfov_deg=hfov_deg,
                            pitch_deg=tel["pitch_deg"], roll_deg=tel["roll_deg"])
@@ -51,7 +51,7 @@ def analyze_frame(name: str | None = None, use_gt: bool = False, tilt_deg: float
                 footprint=footprint_latlon(proj, lat0, lon0), landing_zone=lz, gt_count=len(rec["gt"]))
 
 
-def annotated_frame_jpeg(name: str | None = None, use_gt: bool = False, conf: float = 0.15, imgsz: int = 1280,
+def annotated_frame_jpeg(name: str | None = None, use_gt: bool = False, conf: float | None = None, imgsz: int = 1280,
                          draw_landing: bool = True, max_width: int = 1280) -> bytes:
     res = analyze_frame(name, use_gt=use_gt, conf=conf, imgsz=imgsz)
     img = read_image(auair.frame_path(res["frame"]))
@@ -76,9 +76,9 @@ def annotated_frame_jpeg(name: str | None = None, use_gt: bool = False, conf: fl
     return encode_jpeg(img)
 
 
-def analyze_upload(image_bgr: np.ndarray, conf: float = 0.15, imgsz: int = 1280) -> tuple[dict, bytes]:
+def analyze_upload(image_bgr: np.ndarray, conf: float | None = None, imgsz: int = 1280) -> tuple[dict, bytes]:
     det = get_detector()
-    dets = det.detect(image_bgr, conf=conf, imgsz=imgsz)
+    dets = det.detect(image_bgr, conf=conf or det.conf, imgsz=imgsz)
     h, w = image_bgr.shape[:2]
     lz = landing_zone(dets, w, h)
     out = Detector.annotate(image_bgr, dets)

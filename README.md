@@ -45,20 +45,27 @@ then the same `download_data.py` and `python -m uvicorn skyops.api.main:app --po
 The first detection request downloads `yolov8n.pt` (6 MB) from Ultralytics. The map basemap needs internet
 (CARTO tiles); without it the layers render on a plain dark background.
 
-## What runs without any training
+## Placeholders and trained models
 
-Everything. Placeholders keep every panel live until the real models are trained:
+Every panel works even without trained weights; the trained models replace the placeholders automatically:
 
 | Module | Before training | After training |
 |---|---|---|
 | Perception | COCO-pretrained YOLOv8n mapped to VisDrone labels (weak on oblique low-altitude frames; the UI can show dataset boxes instead) | `models/visdrone_yolo.pt` fine-tuned on VisDrone (picked up automatically) |
 | Land use | brightness/texture colour rules (~63 % pixel accuracy) | `models/landuse_unet.pt` U-Net ResNet-18 |
 | Fleet RUL | training-free k-nearest-neighbour over C-MAPSS windows (RMSE ≈ 22 cycles) | `models/rul_lgbm/` LightGBM point model + conformalised quantile offsets |
-| Trajectory | curvilinear dead reckoning (median error 125 m @ 60 s, 272 m @ 120 s on the capture) | `models/traj_gru.pt`, a GRU that learns the residual of dead reckoning (optional) |
+| Trajectory | curvilinear dead reckoning (median error 125 m @ 60 s, 272 m @ 120 s on the capture) | stays in production: a GRU residual model (`models/traj_gru.pt`, opt-in with `SKYOPS_USE_GRU=true`) only cut mean error by 1-3 % on held-out aircraft |
 
-Measured so far (CPU, 22 s of training): fleet RUL test RMSE 16.8 / 15.7 / 17.5 / 17.8 cycles on FD001–FD004,
-with the 80 % prediction band covering 76–81 % of held-out engines after conformal calibration. The Metrics tab
-(`GET /api/metrics`) always shows the current numbers for every model.
+### Measured results (all weights are committed in `models/`)
+
+| Model | Training | Result |
+|---|---|---|
+| Fleet RUL: LightGBM + conformalised quantile offsets | CPU, 22 s | test RMSE 16.8 / 15.7 / 17.5 / 17.8 cycles on FD001-FD004 (k-NN baseline 22.2); the 80 % band covers 76-81 % of held-out engines |
+| Drone detector: YOLO11s fine-tuned on 2,500 VisDrone images | RTX 3070 Ti, 30 epochs at 960 px, about 35 min | VisDrone val mAP50 0.47, mAP50-95 0.28. On the AU-AIR demo frames, which it never trained on, recall rises from 31 % (COCO placeholder) to 77 % at 60 % precision |
+| Land use: U-Net ResNet-18 on 60 Dubai tiles | RTX 3070 Ti, 60 epochs, about 2 min | mIoU 0.65 and 84 % pixel accuracy on 12 held-out tiles (colour rules: 63 %) |
+| Trajectory: dead reckoning vs GRU residual | CPU, 20 s on 15.6k samples (capture + a 25 min live recording) | the GRU only cut mean error by 1-3 % on held-out aircraft and not at all on turning traffic, so dead reckoning stays in production |
+
+The Metrics tab (`GET /api/metrics`) shows these numbers live.
 
 ## Training commands (run explicitly, GPU laptop recommended)
 
@@ -66,18 +73,20 @@ with the 80 % prediction band covering 76–81 % of held-out engines after confo
 # 1. Fleet RUL, CPU, ~25 s
 .\.venv\Scripts\python.exe -m skyops.fleet.train --subsets FD001 FD002 FD003 FD004
 
-# 2. VisDrone YOLO fine-tune, GPU, ~20-40 min for 30 epochs on the 800-image subset (fetch more with --visdrone-train 3000)
-.\.venv\Scripts\python.exe -m skyops.perception.train_visdrone --model yolov8s.pt --epochs 30 --imgsz 1024 --device 0
+# 2. VisDrone YOLO fine-tune, GPU, ~35 min on an 8 GB card (batch 4: VisDrone's dense images overflow 8 GB at batch 8)
+.\.venv\Scripts\python.exe scripts\download_data.py --only visdrone --visdrone-train 2500
+.\.venv\Scripts\python.exe -m skyops.perception.train_visdrone --model yolo11s.pt --epochs 30 --imgsz 960 --batch 4 --device 0
+.\.venv\Scripts\python.exe scripts\eval_auair.py --frames 120     # transfer check on the demo footage
 
-# 3. Land-use U-Net, GPU, ~5-10 min
-.\.venv\Scripts\python.exe -m skyops.landuse.train --epochs 40 --device cuda
+# 3. Land-use U-Net, GPU, ~2 min
+.\.venv\Scripts\python.exe -m skyops.landuse.train --epochs 60 --device cuda
 
 # 4. (optional) learned trajectory correction, CPU, ~1 min per 10k samples; record more traffic first
 .\.venv\Scripts\python.exe scripts\record_opensky.py --minutes 30 --interval 20
 .\.venv\Scripts\python.exe -m skyops.airspace.train_gru --csv data\raw\opensky\*.csv
 ```
 
-Set `SKYOPS_DEVICE=cuda` in `.env` on the GPU laptop so inference uses the GPU too.
+Inference picks the GPU automatically when PyTorch can see one (`SKYOPS_DEVICE=auto`, the default); force `cpu` or `cuda` in `.env` if needed.
 
 ### RTX 50-series note
 The RTX 5060 (Blackwell, sm_120) needs PyTorch ≥ 2.7 built for CUDA 12.8. `scripts/setup.ps1 -Cuda` installs

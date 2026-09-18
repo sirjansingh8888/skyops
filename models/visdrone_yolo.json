@@ -1,0 +1,27 @@
+{
+  "kind": "yolo-visdrone",
+  "epochs_run": 30,
+  "best_epoch": 30,
+  "map50": 0.46952,
+  "map50_95": 0.27926,
+  "precision": 0.57501,
+  "recall": 0.45463,
+  "train_images": 2500,
+  "val_images": 548,
+  "classes": [
+    "pedestrian",
+    "people",
+    "bicycle",
+    "car",
+    "van",
+    "truck",
+    "tricycle",
+    "awning-tricycle",
+    "bus",
+    "motor"
+  ],
+  "model": "yolo11s.pt",
+  "imgsz": 960,
+  "batch": 4,
+  "epochs": 30
+}

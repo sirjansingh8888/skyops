@@ -58,6 +58,33 @@ def write_yaml(dst: Path = YOLO_DIR) -> Path:
     return y
 
 
+def export_metrics(run_dir: Path | None = None, out: Path | None = None) -> dict:
+    """Summarise an Ultralytics run (results.csv) into models/visdrone_yolo.json so the scores travel with the weights."""
+    import json
+
+    import pandas as pd
+
+    run_dir = run_dir or config.ROOT / "runs" / "visdrone"
+    out = out or config.MODELS_DIR / "visdrone_yolo.json"
+    r = pd.read_csv(run_dir / "results.csv")
+    r.columns = [c.strip() for c in r.columns]
+    best = r.loc[r["metrics/mAP50-95(B)"].idxmax()]
+    args = {}
+    if (run_dir / "args.yaml").exists():
+        import yaml
+
+        a = yaml.safe_load((run_dir / "args.yaml").read_text())
+        args = {k: a.get(k) for k in ("model", "imgsz", "batch", "epochs")}
+    n_train = len(list((YOLO_DIR / "images" / "train").glob("*.jpg")))
+    n_val = len(list((YOLO_DIR / "images" / "val").glob("*.jpg")))
+    rep = dict(kind="yolo-visdrone", epochs_run=int(r["epoch"].max()), best_epoch=int(best["epoch"]), map50=float(best["metrics/mAP50(B)"]),
+               map50_95=float(best["metrics/mAP50-95(B)"]), precision=float(best["metrics/precision(B)"]), recall=float(best["metrics/recall(B)"]),
+               train_images=n_train, val_images=n_val, classes=VISDRONE_CLASSES, **args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rep, indent=2))
+    return rep
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="yolov8s.pt", help="starting weights (yolov8n/s/m.pt or yolo11n/s.pt)")
@@ -83,6 +110,7 @@ def main() -> None:
     config.MODELS_DIR.mkdir(exist_ok=True)
     shutil.copy2(best, config.MODELS_DIR / "visdrone_yolo.pt")
     print("saved", config.MODELS_DIR / "visdrone_yolo.pt")
+    print(export_metrics())
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.get("/api/health")
 def health() -> dict:
     A = get_airspace()
-    return dict(status="ok", airspace=A.name, snapshots=A.n_snapshots, aircraft=A.summary()["n_aircraft"], device=settings.device,
+    return dict(status="ok", airspace=A.name, snapshots=A.n_snapshots, aircraft=A.summary()["n_aircraft"], device=config.resolve_device(),
                 data=dict(visdrone=(config.VISDRONE_DIR / "VisDrone2019-DET-val").exists(), auair=(config.AUAIR_DIR / "annotations.json").exists(),
                           dubai=(config.DUBAI_DIR / "images").exists(), cmapss=config.CMAPSS_DIR.exists()),
                 models=dict(visdrone_yolo=(config.MODELS_DIR / "visdrone_yolo.pt").exists(), landuse_unet=(config.ROOT / settings.landuse_weights).exists(),
@@ -255,7 +255,7 @@ def drone_frames() -> dict:
 
 @app.get("/api/drone/frame/{name}")
 def drone_frame(name: str, gt: bool = False, tilt: float = Query(45.0, ge=5, le=90), hfov: float = Query(69.0, ge=20, le=120),
-                conf: float = Query(0.15, ge=0.01, le=0.9), origin_lat: float | None = None, origin_lon: float | None = None) -> dict:
+                conf: float | None = Query(None, ge=0.01, le=0.9), origin_lat: float | None = None, origin_lon: float | None = None) -> dict:
     from skyops.perception import auair
     from skyops.perception.analyze import analyze_frame
 
@@ -266,7 +266,7 @@ def drone_frame(name: str, gt: bool = False, tilt: float = Query(45.0, ge=5, le=
 
 
 @app.get("/api/drone/frame/{name}/image")
-def drone_frame_image(name: str, gt: bool = False, annotated: bool = True, conf: float = 0.15):
+def drone_frame_image(name: str, gt: bool = False, annotated: bool = True, conf: float | None = Query(None, ge=0.01, le=0.9)):
     from skyops.perception import auair
     from skyops.perception.analyze import annotated_frame_jpeg
 
@@ -278,7 +278,7 @@ def drone_frame_image(name: str, gt: bool = False, annotated: bool = True, conf:
 
 
 @app.post("/api/drone/detect")
-async def drone_detect(file: UploadFile = File(...), conf: float = 0.15) -> dict:
+async def drone_detect(file: UploadFile = File(...), conf: float | None = Query(None, ge=0.01, le=0.9)) -> dict:
     import base64
 
     import cv2
@@ -378,16 +378,15 @@ def metrics() -> dict:
                             top_features=m["top_features"][:8], trained_seconds=m["trained_seconds"], baseline_knn_rmse_fd001=22.2)
     else:
         out["fleet"] = dict(model="k-NN fallback (no training)", note="run python -m skyops.fleet.train")
-    res_csv = config.ROOT / "runs" / "visdrone" / "results.csv"
     perc: dict = dict(model="visdrone-finetuned YOLO" if (config.MODELS_DIR / "visdrone_yolo.pt").exists() else "COCO-pretrained YOLOv8n (placeholder)")
-    if res_csv.exists():
-        import pandas as pd
-
-        r = pd.read_csv(res_csv)
-        r.columns = [c.strip() for c in r.columns]
-        last = r.iloc[-1]
-        perc.update(epochs=int(last.get("epoch", len(r))), map50=float(last.get("metrics/mAP50(B)", float("nan"))),
-                    map50_95=float(last.get("metrics/mAP50-95(B)", float("nan"))))
+    yolo_json = config.MODELS_DIR / "visdrone_yolo.json"
+    if yolo_json.exists() and (config.MODELS_DIR / "visdrone_yolo.pt").exists():
+        y = json.loads(yolo_json.read_text())
+        perc.update(model=f"{y.get('model', 'YOLO')} fine-tuned on VisDrone ({y.get('train_images')} train / {y.get('val_images')} val images, {y.get('imgsz')} px)",
+                    epochs=y["epochs_run"], map50=y["map50"], map50_95=y["map50_95"], precision=y["precision"], recall=y["recall"])
+    transfer = config.MODELS_DIR / "auair_transfer_eval.json"
+    if transfer.exists():
+        perc["auair_transfer"] = json.loads(transfer.read_text())
     out["perception"] = perc
     lu_json = (config.ROOT / settings.landuse_weights).with_suffix(".json")
     if lu_json.exists():

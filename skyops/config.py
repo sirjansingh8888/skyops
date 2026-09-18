@@ -42,7 +42,7 @@ class Settings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8000
-    device: str = "cpu"  # "cuda" on the GPU laptop
+    device: str = "auto"  # "auto" = CUDA when PyTorch can see a GPU, else CPU; or force "cpu" / "cuda"
     yolo_weights: str = "yolov8n.pt"  # replaced by models/visdrone_yolo.pt after fine-tuning
     landuse_weights: str = "models/landuse_unet.pt"
     rul_model: str = "models/rul_lgbm.txt"
@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.8-flash"
     gemini_fallback_model: str = "gemini-3.5-flash-lite"  # used once when the main model returns 429 / 503
     claude_model: str = "claude-opus-5"
+    use_gru: bool = False                     # opt in to the GRU residual predictor (it did not beat dead reckoning)
     opensky_csv: str | None = None            # replay another recording (see scripts/record_opensky.py)
     opensky_client_id: str | None = None      # optional OpenSky API client for higher live-feed rate limits
     opensky_client_secret: str | None = None
@@ -59,6 +60,18 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def resolve_device() -> str:
+    """Inference device: honours SKYOPS_DEVICE, with 'auto' picking CUDA when available."""
+    if settings.device != "auto":
+        return settings.device
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001
+        return "cpu"
 
 
 def replay_csv() -> Path:

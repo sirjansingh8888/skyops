@@ -75,7 +75,7 @@ def get_segmenter():
     w = config.ROOT / settings.landuse_weights
     if w.exists():
         try:
-            return UNetSegmenter(w, settings.device)
+            return UNetSegmenter(w, config.resolve_device())
         except Exception as e:  # noqa: BLE001
             print(f"[landuse] could not load {w}: {e}; using colour rules")
     return HeuristicSegmenter()

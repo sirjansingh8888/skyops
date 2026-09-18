@@ -22,7 +22,7 @@ git clone https://github.com/sirjansingh8888/skyops.git
 cd skyops
 .\scripts\setup.ps1 -Cuda                                   # RTX 5060 -> CUDA 12.8 PyTorch
 .\.venv\Scripts\python.exe scripts\download_data.py --all   # or add: --only visdrone --visdrone-train 3000
-copy .env.example .env  # add GEMINI_API_KEY (steps below), set SKYOPS_DEVICE=cuda
+copy .env.example .env  # add your own GEMINI_API_KEY (steps below); the GPU is picked up automatically
 .\scripts\run.ps1
 ```
 

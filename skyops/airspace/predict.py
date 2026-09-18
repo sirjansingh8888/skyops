@@ -113,7 +113,7 @@ class GRUCorrectedPredictor:
         for icao, g in history.groupby("icao24", sort=False):
             g = g[~g.on_ground].drop_duplicates("time_position").sort_values("time_position")
             if len(g) >= self.k:
-                feats.append(self.tg.history_features(g))
+                feats.append(self.tg.history_features(g, self.k))
                 ids.append(icao)
         if not feats:
             return base
@@ -139,12 +139,14 @@ _PREDICTOR: Predictor | None = None
 
 
 def get_predictor() -> Predictor:
-    """The best available predictor: the GRU-corrected one when models/traj_gru.pt exists, else dead reckoning."""
+    """The production predictor. Dead reckoning by default: on held-out aircraft the GRU residual model only
+    improved mean error by 1-3 % and not at all on turning traffic (see models/traj_gru.json), so it is opt-in
+    via SKYOPS_USE_GRU=true rather than switched on just because the weights exist."""
     global _PREDICTOR
     if _PREDICTOR is None:
         w = config.MODELS_DIR / "traj_gru.pt"
         _PREDICTOR = DeadReckoningPredictor()
-        if w.exists():
+        if config.settings.use_gru and w.exists():
             try:
                 _PREDICTOR = GRUCorrectedPredictor(w)
             except Exception as e:  # noqa: BLE001

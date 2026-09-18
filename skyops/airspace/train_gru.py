@@ -37,9 +37,9 @@ def enu_km(lat: np.ndarray, lon: np.ndarray, lat0: float, lon0: float) -> tuple[
     return east, north
 
 
-def history_features(hist: pd.DataFrame) -> np.ndarray:
-    """(K, N_FEAT) features of the last K states, relative to the most recent one."""
-    h = hist.tail(K)
+def history_features(hist: pd.DataFrame, k: int = K) -> np.ndarray:
+    """(k, N_FEAT) features of the last k states, relative to the most recent one."""
+    h = hist.tail(k)
     last = h.iloc[-1]
     e, n = enu_km(h.latitude.values.astype(float), h.longitude.values.astype(float), float(last.latitude), float(last.longitude))
     trk = np.radians(h.true_track.values.astype(float))
@@ -49,16 +49,16 @@ def history_features(hist: pd.DataFrame) -> np.ndarray:
     return f.astype(np.float32)
 
 
-def build_samples(airspace: Airspace) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def build_samples(airspace: Airspace, k: int = K) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """X (N,K,F), Y (N,H,2) residual km, M (N,H) mask, G (N,) group id per aircraft (for a leak-free split)."""
     dr = DeadReckoningPredictor()
     X, Y, M, G = [], [], [], []
     for gi, (icao, tr) in enumerate(airspace.df.groupby("icao24")):
         tr = tr[~tr.on_ground].drop_duplicates("time_position").sort_values("time_position")
-        if len(tr) < K + 2:
+        if len(tr) < k + 2:
             continue
-        for i in range(K - 1, len(tr) - 1):
-            hist = tr.iloc[i - K + 1:i + 1]
+        for i in range(k - 1, len(tr) - 1):
+            hist = tr.iloc[i - k + 1:i + 1]
             last = hist.iloc[-1]
             pred = dr.predict(hist, HORIZONS).set_index("horizon_s")
             y = np.zeros((len(HORIZONS), 2), np.float32)
@@ -73,7 +73,7 @@ def build_samples(airspace: Airspace) -> tuple[np.ndarray, np.ndarray, np.ndarra
                 m[hi] = 1.0
             if m.sum() == 0:
                 continue
-            X.append(history_features(hist))
+            X.append(history_features(hist, k))
             Y.append(y)
             M.append(m)
             G.append(gi)
@@ -96,11 +96,11 @@ def make_model(hidden: int = 64):
     return ResidualGRU()
 
 
-def train(csvs: list[str], epochs: int, out: Path, seed: int = 0) -> dict:
+def train(csvs: list[str], epochs: int, out: Path, seed: int = 0, k: int = K) -> dict:
     import torch
 
     torch.manual_seed(seed)
-    parts = [build_samples(Airspace(derive(load_raw(p)), name=Path(p).stem)) for p in csvs]
+    parts = [build_samples(Airspace(derive(load_raw(p)), name=Path(p).stem), k) for p in csvs]
     offset, Xs, Ys, Ms, Gs = 0, [], [], [], []
     for X, Y, M, G in parts:
         Xs.append(X); Ys.append(Y); Ms.append(M); Gs.append(G + offset)
@@ -139,12 +139,26 @@ def train(csvs: list[str], epochs: int, out: Path, seed: int = 0) -> dict:
             best, best_state = v, {k: t.clone() for k, t in model.state_dict().items()}
     model.load_state_dict(best_state)
     with torch.no_grad():
-        gru_err = err_m(model(Xv), Yv, Mv)
+        pv = model(Xv)
+        gru_err = err_m(pv, Yv, Mv)
         dr_err = err_m(torch.zeros_like(Yv), Yv, Mv)
-    report = dict(samples=int(len(X)), val_samples=int(va.sum()), horizons=list(HORIZONS), dead_reckoning_mean_m=dr_err, gru_mean_m=gru_err,
-                  improvement_pct=[round(100 * (1 - g / d), 1) if d else 0.0 for g, d in zip(gru_err, dr_err)], seconds=round(time.time() - t0, 1))
+
+        def median_m(p, y, m):
+            d = torch.linalg.norm(p - y, dim=-1) * 1000.0
+            return [float(d[:, i][m[:, i] > 0].median()) if (m[:, i] > 0).any() else 0.0 for i in range(len(HORIZONS))]
+
+        # aircraft that changed heading by more than 2 degrees over the last step: where dead reckoning is weakest
+        hdg = torch.atan2(Xv[:, :, 5], Xv[:, :, 6])
+        dh = torch.abs(torch.atan2(torch.sin(hdg[:, -1] - hdg[:, -2]), torch.cos(hdg[:, -1] - hdg[:, -2])))
+        turning = dh > np.radians(2.0)
+        turn = dict(n=int(turning.sum()), dead_reckoning_mean_m=err_m(torch.zeros_like(Yv[turning]), Yv[turning], Mv[turning]),
+                    gru_mean_m=err_m(pv[turning], Yv[turning], Mv[turning])) if turning.any() else {}
+    report = dict(k=k, samples=int(len(X)), val_samples=int(va.sum()), horizons=list(HORIZONS), dead_reckoning_mean_m=dr_err, gru_mean_m=gru_err,
+                  improvement_pct=[round(100 * (1 - g / d), 1) if d else 0.0 for g, d in zip(gru_err, dr_err)],
+                  dead_reckoning_median_m=median_m(torch.zeros_like(Yv), Yv, Mv), gru_median_m=median_m(pv, Yv, Mv), turning=turn,
+                  seconds=round(time.time() - t0, 1))
     out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(dict(state_dict=model.state_dict(), k=K, horizons=list(HORIZONS), report=report), out)
+    torch.save(dict(state_dict=model.state_dict(), k=k, horizons=list(HORIZONS), report=report), out)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2))
     return report
 
@@ -153,10 +167,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--csv", nargs="+", default=[str(config.OPENSKY_CSV)], help="one or more state-vector CSVs (globs allowed)")
     ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--k", type=int, default=K, help="history length (states) fed to the GRU")
     ap.add_argument("--out", default=str(config.MODELS_DIR / "traj_gru.pt"))
     a = ap.parse_args()
     files = sorted({f for pat in a.csv for f in (glob.glob(pat) or [pat])})
-    print(json.dumps(train(files, a.epochs, Path(a.out)), indent=2))
+    print(json.dumps(train(files, a.epochs, Path(a.out), k=a.k), indent=2))
 
 
 if __name__ == "__main__":

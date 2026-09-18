@@ -33,7 +33,7 @@ def resolve_weights() -> tuple[str, str]:
 
 
 class Detector:
-    def __init__(self, weights: str | None = None, device: str | None = None, conf: float = 0.15, imgsz: int = 1280):
+    def __init__(self, weights: str | None = None, device: str | None = None, conf: float | None = None, imgsz: int = 1280):
         from ultralytics import YOLO  # imported lazily: torch import is slow
 
         if weights:
@@ -42,8 +42,9 @@ class Detector:
             self.weights, self.kind = resolve_weights()
         self.model = YOLO(self.weights)
         self.names = self.model.names
-        self.device = device or settings.device
-        self.conf = conf
+        self.device = device or config.resolve_device()
+        # the COCO placeholder needs a low threshold to see anything from the air; the fine-tune is confident enough for 0.25
+        self.conf = conf if conf is not None else (0.15 if self.kind == "coco-pretrained" else 0.25)
         self.imgsz = imgsz
 
     def detect(self, image, conf: float | None = None, imgsz: int | None = None) -> list[dict]:

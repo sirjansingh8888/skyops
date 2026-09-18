@@ -1,0 +1,17 @@
+{
+  "coco-pretrained yolov8n": {
+    "frames": 120,
+    "gt_boxes": 265,
+    "predictions": 119,
+    "recall": 0.306,
+    "precision": 0.681,
+    "note": "COCO labels, all classes counted"
+  },
+  "visdrone fine-tuned": {
+    "frames": 120,
+    "gt_boxes": 265,
+    "predictions": 341,
+    "recall": 0.766,
+    "precision": 0.595
+  }
+}
