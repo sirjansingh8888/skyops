@@ -428,11 +428,7 @@ class ChatRequest(BaseModel):
 def assistant_chat(req: ChatRequest) -> dict:
     from skyops import assistant
 
-    st = assistant.status()
-    if not st["available"]:
-        return dict(error=f"Assistant offline: put {st['key_env']}=... in skyops/.env and restart the server (see HANDOFF.md).",
-                    answer=None, tool_calls=[])
-    a = assistant.get_assistant()
+    a = assistant.get_assistant()  # falls back to the rule-based offline assistant when no API key is configured
     if req.reset:
         a.reset()
     return a.ask(req.message, t_idx=req.t_idx, context=req.context)

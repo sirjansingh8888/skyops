@@ -40,6 +40,13 @@ class GeminiAssistant:
         self.history.clear()
         self.transcript.clear()
 
+    @staticmethod
+    def _offline(text: str, t_idx, context, why: str) -> dict:
+        """Keep the demo alive: answer from the same tools with templates when the LLM cannot be reached."""
+        from skyops.assistant.offline import OfflineAssistant
+
+        return OfflineAssistant().ask(text, t_idx=t_idx, context=context, note=f"{why}. Offline answer from the live tools:")
+
     def _create(self, model: str):
         return self.client.interactions.create(model=model, store=False, input=self.history, tools=self.tools,
                                                system_instruction=SYSTEM_PROMPT, generation_config={"thinking_level": "low"})
@@ -84,15 +91,15 @@ class GeminiAssistant:
             del self.history[checkpoint:]
             code = getattr(e, "code", None)
             if code == 429:
-                msg = "Gemini free-tier rate limit reached. Wait a minute and try again (limits reset per minute and per day)."
+                msg = "Gemini free-tier rate limit reached (limits reset per minute and per day)"
             elif code in (400, 401, 403):
-                msg = f"Gemini rejected the request ({code}). Check GEMINI_API_KEY in skyops/.env. Details: {getattr(e, 'message', e)}"
+                msg = f"Gemini rejected the request ({code}): check GEMINI_API_KEY in skyops/.env"
             else:
-                msg = f"Gemini API error {code}: {getattr(e, 'message', e)}"
-            return dict(error=msg, answer=None, tool_calls=tool_calls)
+                msg = f"Gemini API error {code}"
+            return self._offline(text, t_idx, context, msg)
         except Exception as e:  # noqa: BLE001 - network problems and the like
             del self.history[checkpoint:]
-            return dict(error=f"Could not reach the Gemini API: {type(e).__name__}: {e}", answer=None, tool_calls=tool_calls)
+            return self._offline(text, t_idx, context, f"Could not reach the Gemini API ({type(e).__name__})")
         rec = dict(question=text, answer=answer, tool_calls=tool_calls, provider=self.provider, model=model_used,
                    seconds=round(time.time() - t0, 1))
         self.transcript.append(rec)

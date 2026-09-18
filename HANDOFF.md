@@ -72,6 +72,10 @@ the API keys page and create a new one.
 
 **Good to know**
 
+- Without a key the Assistant tab still works in *offline rules* mode: it picks a tool from keywords in the question and
+  fills a template, so the preset questions always answer with live numbers. The same fallback kicks in if Gemini
+  cannot be reached or the quota runs out during the demo.
+
 - Free-tier limits are per minute and per day and are shown in AI Studio (Dashboard, Usage and rate limits). One
   question costs 2 to 4 requests because the assistant calls tools. If the limit is hit, the app retries once on
   the lighter `gemini-3.5-flash-lite` model and otherwise asks you to wait a minute.

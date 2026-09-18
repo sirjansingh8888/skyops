@@ -143,7 +143,8 @@ skyops/
   skyops/mission.py            the go / no-go risk brief
   skyops/route.py              A* route planner around red zones and geofences
   skyops/assistant/            provider-neutral tools (tools.py), Gemini agent (gemini_agent.py, default),
-                               optional Claude agent (agent.py), shared system prompt (prompts.py)
+                               optional Claude agent (agent.py), rule-based offline fallback (offline.py),
+                               shared system prompt (prompts.py)
   skyops/api/main.py           FastAPI app + static UI
   web/                         console (MapLibre + deck.gl, vanilla JS)
   tests/test_smoke.py          pytest smoke tests

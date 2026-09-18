@@ -200,10 +200,46 @@ def test_gemini_function_calling_loop(monkeypatch):
     assert [s["type"] for s in a.history] == ["user_input", "function_call", "function_result", "model_output"]
 
 
-def test_api_roundtrip():
+def test_offline_assistant_answers_from_tools(monkeypatch):
+    from skyops.assistant.offline import OfflineAssistant
+
+    a = OfflineAssistant()
+    ctx = dict(mission_site=dict(lat=28.61, lon=77.05, alt_m=100, radius_km=10), route_destination=dict(lat=28.52, lon=77.16))
+    launch = a.ask("Can I launch a drone at the mission site right now?", t_idx=5, context=ctx)
+    assert launch["tool_calls"][0]["name"] == "mission_risk_brief" and "NO-GO" in launch["answer"]
+    assert a.ask("Plan the delivery route", t_idx=5, context=ctx)["tool_calls"][0]["name"] == "plan_drone_route"
+    assert a.ask("Which aircraft pairs are in conflict?", t_idx=5)["tool_calls"][0]["name"] == "list_conflicts"
+    assert a.ask("Which engines should be grounded?", t_idx=5)["tool_calls"][0]["name"] == "fleet_health"
+    assert "IGO084" in a.ask("Tell me about IGO084", t_idx=5)["answer"]
+    assert a.ask("hello", t_idx=5)["tool_calls"][0]["name"] == "airspace_overview"
+
+
+def test_gemini_failure_falls_back_to_offline(monkeypatch):
+    pytest.importorskip("google.genai")
+    from types import SimpleNamespace
+
+    from skyops.assistant import gemini_agent
+
+    class Boom:
+        def create(self, **kw):
+            raise ConnectionError("no network")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    a = gemini_agent.GeminiAssistant()
+    a.client = SimpleNamespace(interactions=Boom())
+    r = a.ask("Which aircraft pairs are in conflict?", t_idx=5)
+    assert r["provider"] == "offline" and "Could not reach the Gemini API" in r["answer"] and not a.history
+
+
+def test_api_roundtrip(monkeypatch):
     from fastapi.testclient import TestClient
 
+    import skyops.assistant as assistant_pkg
     from skyops.api.main import app
+
+    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):  # never call a real LLM from tests
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(assistant_pkg, "_singleton", None)
 
     c = TestClient(app)
     assert c.get("/api/health").json()["status"] == "ok"
@@ -212,6 +248,8 @@ def test_api_roundtrip():
     brief = c.post("/api/mission/brief", json=dict(lat=19.08, lon=72.88, alt_m=100, radius_km=10, t_idx=3)).json()
     assert brief["verdict"] in ("GO", "CAUTION", "NO-GO")
     assert c.get("/api/assistant/status").status_code == 200
+    chat = c.post("/api/assistant/chat", json=dict(message="Any abnormal aircraft behaviour right now?", t_idx=3)).json()
+    assert chat.get("answer") and chat["tool_calls"]  # offline rules answer when no API key is configured
     assert c.get("/api/airspace/snapshot/-1").json()["t_idx"] == 19
     try:
         assert c.post("/api/scenario", json={"name": "converging"}).json()["active"] == "converging"

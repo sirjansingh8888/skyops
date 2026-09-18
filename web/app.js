@@ -525,9 +525,9 @@ async function loadMetrics() {
 async function initAssistant() {
   try {
     const s = await api('/api/assistant/status'); state.assistant = s;
-    $('#chip-assistant').textContent = s.available ? `assistant: ${s.model}` : 'assistant: offline (no API key)';
-    $('#chip-assistant').className = 'chip ' + (s.available ? 'ok' : '');
-    $('#assist-model').textContent = s.available ? `${s.provider} · ${s.model}` : `offline: put ${s.key_env} in skyops/.env`;
+    $('#chip-assistant').textContent = s.available ? `assistant: ${s.model}` : 'assistant: offline rules';
+    $('#chip-assistant').className = 'chip ' + (s.available ? 'ok' : 'warm');
+    $('#assist-model').textContent = s.available ? `${s.provider} · ${s.model}` : `offline rules (templated answers); add ${s.key_env} to skyops/.env for the full assistant`;
   } catch (e) { /* ignore */ }
 }
 
@@ -539,6 +539,8 @@ async function sendChat(text) {
   const wait = addMsg('bot', '<span class="muted">Consulting the tower…</span>');
   const ctx = { airspace: state.latest ? state.latest.airspace : 'baseline' };
   if (state.mission.site) ctx.mission_site = state.mission.site;
+  const dLat = parseFloat($('#r-lat').value), dLon = parseFloat($('#r-lon').value);
+  if (!Number.isNaN(dLat) && !Number.isNaN(dLon)) ctx.route_destination = { lat: dLat, lon: dLon };
   if (state.drone.frames.length) ctx.current_drone_frame = state.drone.frames[state.drone.idx].name;
   if (state.landuse.tile) ctx.current_landuse_tile = state.landuse.tile;
   if (state.selected) ctx.selected_aircraft_icao24 = state.selected;
