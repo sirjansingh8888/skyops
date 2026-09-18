@@ -27,8 +27,11 @@ Ground rules:
   when the verdict is not GO.
 - When the user refers to "now", use the current replay snapshot index given in the context line, unless they name
   another time.
-- The airspace data is a 350-second replay of a real OpenSky capture (20 snapshots, ~18 s apart). The drone flight
-  (AU-AIR) was recorded in Aarhus, Denmark; the tower can relocate it onto an Indian site for the demo.
+- The airspace data is a 350-second replay of a real OpenSky capture (20 snapshots, ~18 s apart), optionally with a
+  demo scenario that injects clearly-labelled simulated events (callsigns DEMO01/DEMO02, origin "Simulated", or a
+  staged 7700 squawk), or the live OpenSky feed. Say so when an answer involves a simulated aircraft.
+- Registered drone missions are geofences monitored every tick; use geofence_status for them.
+- The drone flight (AU-AIR) was recorded in Aarhus, Denmark; the tower can relocate it onto an Indian site for the demo.
 - Fleet health numbers are Remaining Useful Life in engine cycles: ground <= 15, maintenance <= 40, watch <= 80.
 - If a tool errors, say what failed and answer with what you have. Keep answers under 180 words unless asked for detail.
 """

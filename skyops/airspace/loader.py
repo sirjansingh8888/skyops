@@ -2,10 +2,14 @@
 
 The organisers' CSV is a stack of OpenSky *state vectors*: one row per aircraft per snapshot,
 20 snapshots roughly 18 s apart over the Indian subcontinent (about 185 aircraft each).
+
+`get_airspace()` returns the *active* airspace: the baseline replay, a demo scenario built on top of it
+(see scenarios.py) or the live feed (see live.py). Everything downstream (API, mission brief, assistant
+tools) reads through it, so switching the active airspace switches the whole system.
 """
 from __future__ import annotations
 
-from functools import lru_cache
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -14,20 +18,31 @@ import pandas as pd
 from skyops import config
 from skyops.airspace.airports import nearest_airport
 
+RAW_COLUMNS = ["snapshot_time", "icao24", "callsign", "origin_country", "time_position", "last_contact", "longitude", "latitude",
+               "baro_altitude", "on_ground", "velocity", "true_track", "vertical_rate", "sensors", "geo_altitude", "squawk", "spi",
+               "position_source"]
 STATE_COLUMNS = [
     "icao24", "callsign", "origin_country", "snapshot_time", "t_idx", "t_rel", "latitude", "longitude",
     "altitude_m", "altitude_ft", "on_ground", "velocity", "speed_kt", "true_track", "vertical_rate",
-    "vs_fpm", "squawk", "stale_s", "near_airport", "airport_km",
+    "vs_fpm", "squawk", "stale_s", "near_airport", "airport_km", "simulated",
 ]
 
 
-def load_states(path: Path | str = config.OPENSKY_CSV) -> pd.DataFrame:
-    """Read the raw CSV and add derived columns. Rows are sorted by aircraft then time."""
-    df = pd.read_csv(path, dtype={"squawk": "string", "icao24": "string", "callsign": "string"})
-    df["callsign"] = df["callsign"].fillna("").str.strip()
+def load_raw(path: Path | str | None = None) -> pd.DataFrame:
+    """The CSV as recorded (raw OpenSky state-vector columns)."""
+    return pd.read_csv(path or config.replay_csv(), dtype={"squawk": "string", "icao24": "string", "callsign": "string"})
+
+
+def derive(raw: pd.DataFrame) -> pd.DataFrame:
+    """Clean raw state vectors and add derived columns. Rows are sorted by aircraft then time."""
+    df = raw.copy()
+    df["icao24"] = df["icao24"].astype("string")
+    df["callsign"] = df["callsign"].astype("string").fillna("").str.strip()
     df["callsign"] = df["callsign"].where(df["callsign"] != "", df["icao24"].str.upper())
     df["on_ground"] = df["on_ground"].astype(str).str.lower().eq("true")
-    df["squawk"] = df["squawk"].fillna("")
+    df["squawk"] = df["squawk"].astype("string").fillna("")
+    df["origin_country"] = df["origin_country"].fillna("Unknown")
+    df["simulated"] = df["origin_country"].eq("Simulated")
 
     df["altitude_m"] = df["baro_altitude"].fillna(df["geo_altitude"])
     df.loc[df["on_ground"] & df["altitude_m"].isna(), "altitude_m"] = 0.0
@@ -35,6 +50,8 @@ def load_states(path: Path | str = config.OPENSKY_CSV) -> pd.DataFrame:
     df["vertical_rate"] = df["vertical_rate"].fillna(0.0)
     df["velocity"] = df["velocity"].fillna(0.0)
     df["true_track"] = df["true_track"].fillna(0.0) % 360.0
+    df["time_position"] = df["time_position"].fillna(df["snapshot_time"])
+    df["last_contact"] = df["last_contact"].fillna(df["snapshot_time"])
 
     df["altitude_ft"] = df["altitude_m"] / config.FT_TO_M
     df["speed_kt"] = df["velocity"] * config.MS_TO_KT
@@ -56,10 +73,15 @@ def load_states(path: Path | str = config.OPENSKY_CSV) -> pd.DataFrame:
     return df.sort_values(["icao24", "snapshot_time"]).reset_index(drop=True)
 
 
-class Airspace:
-    """In-memory replay of the capture with per-snapshot and per-aircraft access."""
+def load_states(path: Path | str | None = None) -> pd.DataFrame:
+    return derive(load_raw(path))
 
-    def __init__(self, df: pd.DataFrame):
+
+class Airspace:
+    """In-memory sequence of snapshots with per-snapshot and per-aircraft access."""
+
+    def __init__(self, df: pd.DataFrame, name: str = "baseline"):
+        self.name = name
         self.df = df
         self.times: list[int] = [int(t) for t in np.sort(df["snapshot_time"].unique())]
         self.t0 = self.times[0]
@@ -67,13 +89,23 @@ class Airspace:
         self._by_ac = {k: g for k, g in df.groupby("icao24")}
 
     @classmethod
-    def from_csv(cls, path: Path | str = config.OPENSKY_CSV) -> "Airspace":
+    def from_csv(cls, path: Path | str | None = None) -> "Airspace":
         return cls(load_states(path))
+
+    @classmethod
+    def from_raw(cls, raw: pd.DataFrame, name: str) -> "Airspace":
+        return cls(derive(raw), name=name)
 
     # ---- snapshots ------------------------------------------------------------------
     @property
     def n_snapshots(self) -> int:
         return len(self.times)
+
+    def clip(self, t_idx: int | None) -> int:
+        """Valid snapshot index; None or negative values mean 'latest'."""
+        if t_idx is None or t_idx < 0:
+            return self.n_snapshots - 1
+        return int(min(t_idx, self.n_snapshots - 1))
 
     def snapshot(self, t_idx: int) -> pd.DataFrame:
         t_idx = int(np.clip(t_idx, 0, self.n_snapshots - 1))
@@ -96,10 +128,15 @@ class Airspace:
     def aircraft(self) -> list[str]:
         return list(self._by_ac.keys())
 
+    def callsign(self, icao24: str) -> str:
+        tr = self.track(icao24)
+        return str(tr["callsign"].iloc[-1]) if len(tr) else icao24
+
     # ---- summaries ------------------------------------------------------------------
     def summary(self) -> dict:
         df = self.df
         return dict(
+            name=self.name,
             n_aircraft=int(df["icao24"].nunique()),
             n_snapshots=self.n_snapshots,
             span_s=int(self.times[-1] - self.t0),
@@ -128,7 +165,45 @@ def to_records(df: pd.DataFrame, columns: list[str] | None = None) -> list[dict]
     return recs
 
 
-@lru_cache(maxsize=1)
-def get_airspace() -> Airspace:
-    """Process-wide cached capture (used by the API)."""
-    return Airspace.from_csv()
+# ----------------------------------------------------------------------------- active-airspace registry
+_LOCK = threading.RLock()
+_REGISTRY: dict[str, Airspace] = {}
+_ACTIVE = "baseline"
+
+
+def _baseline() -> Airspace:
+    with _LOCK:
+        if "baseline" not in _REGISTRY:
+            _REGISTRY["baseline"] = Airspace.from_csv()
+        return _REGISTRY["baseline"]
+
+
+def get_airspace(name: str | None = None) -> Airspace:
+    """The active airspace (or a named one). Baseline is loaded lazily and cached for the process."""
+    with _LOCK:
+        key = name or _ACTIVE
+        if key == "baseline":
+            return _baseline()
+        if key not in _REGISTRY:
+            from skyops.airspace import scenarios  # lazy: scenarios imports this module
+
+            _REGISTRY[key] = scenarios.build(key, load_raw())
+        return _REGISTRY[key]
+
+
+def register(name: str, airspace: Airspace) -> None:
+    """Add or replace a named airspace (used by the live feed)."""
+    with _LOCK:
+        _REGISTRY[name] = airspace
+
+
+def set_active(name: str) -> Airspace:
+    global _ACTIVE
+    with _LOCK:
+        a = get_airspace(name)  # raises KeyError for unknown scenarios
+        _ACTIVE = name
+        return a
+
+
+def active_name() -> str:
+    return _ACTIVE

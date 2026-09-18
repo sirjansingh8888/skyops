@@ -192,5 +192,23 @@ def landuse_assessment(tile: str | None = None) -> str:
     return _j(res)
 
 
-ALL_TOOLS = [airspace_overview, list_conflicts, list_anomalies, aircraft_info, traffic_near, mission_risk_brief,
+@beta_tool
+def geofence_status(t_idx: int | None = None) -> str:
+    """Registered drone missions (geofences) and current intrusion alerts: manned aircraft inside a geofence or
+    predicted to enter one, with time to entry. Also reports which airspace is active (recorded, scenario or live).
+
+    Args:
+        t_idx: Snapshot index 0-19. Defaults to the latest snapshot.
+    """
+    from skyops import utm
+    from skyops.airspace import loader, scenarios
+
+    A = get_airspace()
+    t = _t(t_idx)
+    missions = [{k: m[k] for k in ("id", "name", "lat", "lon", "radius_km", "ceiling_m", "status")} | {"brief": m["brief"]["verdict"]} for m in utm.list_missions()]
+    return _j(dict(t_idx=t, airspace=loader.active_name(), scenario_notes=scenarios.notes(loader.active_name()), missions=missions,
+                   alerts=utm.check_intrusions(A, t, predict_at(A, t))))
+
+
+ALL_TOOLS = [airspace_overview, list_conflicts, list_anomalies, aircraft_info, traffic_near, mission_risk_brief, geofence_status,
              fleet_health, engine_detail, drone_camera_assessment, landuse_assessment]

@@ -91,4 +91,23 @@ svg.chart { width: 100%; height: 190px; background: #0b1120; border-radius: 8px;
 svg.chart text { fill: var(--muted); font-size: 10px; }
 .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .maplibregl-ctrl-attrib { font-size: 10px; }
-@media (max-width: 1100px) { #panel { width: 380px; } .replay { min-width: 240px; } .brand .sub { display: none; } }
+.hidden { display: none !important; }
+.badge.sim { background: #581c87; color: #e9d5ff; }
+.replay select { width: auto; max-width: 190px; padding: 6px 8px; }
+.btn.live { background: #7f1d1d; border-color: var(--red); color: #fecaca; animation: pulse 1.6s infinite; }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .5); } 50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); } }
+.list li.ok { border-left-color: var(--green); }
+.list li .del { float: right; padding: 0 7px; font-size: 11px; color: #fca5a5; border-color: #7f1d1d; }
+.tabs { overflow-x: auto; }
+.tabs button { white-space: nowrap; }
+#tab-metrics table { margin-top: 6px; }
+@media (max-width: 1300px) { .brand .sub { display: none; } .chips .chip:nth-child(n+4) { display: none; } }
+@media (max-width: 1100px) { #panel { width: 380px; } .replay { min-width: 240px; } }
+@media (max-width: 860px) {
+  #topbar { height: auto; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  .replay { margin-left: 0; width: 100%; min-width: 0; flex-wrap: wrap; }
+  main { flex-direction: column; height: auto; }
+  #map { height: 46vh; flex: none; }
+  #panel { width: 100%; border-left: 0; border-top: 1px solid var(--border); height: auto; min-height: 50vh; }
+  .legend { display: none; }
+}

@@ -21,6 +21,17 @@ def _pairwise_haversine_m(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     return 2 * config.R_EARTH_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 
+def _closing(a: pd.Series, b: pd.Series) -> bool:
+    """True when the pair's horizontal range is decreasing right now (relative position . relative velocity < 0)."""
+    lat0 = np.radians((float(a.latitude) + float(b.latitude)) / 2)
+    rx = np.radians(float(b.longitude) - float(a.longitude)) * np.cos(lat0) * config.R_EARTH_M
+    ry = np.radians(float(b.latitude) - float(a.latitude)) * config.R_EARTH_M
+    ta, tb = np.radians(float(a.true_track)), np.radians(float(b.true_track))
+    rvx = float(b.velocity) * np.sin(tb) - float(a.velocity) * np.sin(ta)
+    rvy = float(b.velocity) * np.cos(tb) - float(a.velocity) * np.cos(ta)
+    return bool(rx * rvx + ry * rvy < 0)
+
+
 def detect_conflicts(current: pd.DataFrame, predictions: pd.DataFrame | None,
                      h_sep_nm: float = config.HORIZONTAL_SEP_NM, v_sep_ft: float = config.VERTICAL_SEP_FT,
                      terminal_h_sep_nm: float = config.TERMINAL_HORIZONTAL_SEP_NM, min_alt_m: float = 300.0,
@@ -88,7 +99,7 @@ def detect_conflicts(current: pd.DataFrame, predictions: pd.DataFrame | None,
             continue
         t_loss = float(first_loss[i, j]) if genuine else float(first_marginal[i, j])
         a, b = air.iloc[i], air.iloc[j]
-        converging = bool(min_dist[i, j] < dist0[i, j] - 1.0)
+        converging = _closing(a, b)
         if not genuine:
             severity = "marginal"
         elif t_loss == 0:

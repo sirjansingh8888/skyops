@@ -59,6 +59,51 @@ def test_mission_brief(airspace):
     assert g["zone"] == "green"
 
 
+def test_scenarios_inject_on_cue():
+    from skyops.airspace import scenarios
+    from skyops.airspace.anomalies import detect_anomalies
+    from skyops.airspace.conflicts import detect_conflicts
+    from skyops.airspace.loader import load_raw
+    from skyops.airspace.predict import predict_at
+
+    A = scenarios.build("combined", load_raw())
+    assert int(A.df.simulated.sum()) == 2 * A.n_snapshots
+    cf = detect_conflicts(A.snapshot(13), predict_at(A, 13))
+    assert any(c["severity"] == "critical" and "DEMO" in c["a"]["callsign"] + c["b"]["callsign"] for c in cf)
+    early = detect_conflicts(A.snapshot(4), predict_at(A, 4))
+    assert any("DEMO" in c["a"]["callsign"] and c["severity"] in ("warning", "alert") and c["converging"] for c in early)
+    an = detect_anomalies(A.snapshot(8), A.snapshot(7))
+    assert any(a["type"] == "EMERGENCY_SQUAWK" and a["severity"] == "critical" for a in an)
+
+
+def test_utm_geofence_alerts(tmp_path, monkeypatch, airspace):
+    from skyops import utm
+    from skyops.airspace.predict import predict_at
+
+    monkeypatch.setattr(utm, "_STORE", tmp_path / "missions.json")
+    monkeypatch.setattr(utm, "_MISSIONS", None)
+    m = utm.register_mission("approach test", 28.545, 77.0, radius_km=4, ceiling_m=120, t_idx=5, force=True)
+    assert m["status"] != "rejected" and (tmp_path / "missions.json").exists()
+    alerts = utm.check_intrusions(airspace, 5, predict_at(airspace, 5))
+    assert alerts and all(a["type"] in ("INTRUSION", "PREDICTED_INTRUSION") for a in alerts)
+    far = utm.register_mission("vellore", 12.9692, 79.1559, radius_km=1, ceiling_m=100, t_idx=5)
+    assert far["status"] == "approved"
+    assert not [a for a in utm.check_intrusions(airspace, 5, predict_at(airspace, 5)) if a["mission_id"] == far["id"]]
+    assert utm.remove_mission(m["id"]) and utm.remove_mission(far["id"])
+
+
+def test_gru_pipeline_shapes(airspace):
+    """The learned-predictor code path works end to end with untrained weights (no training here)."""
+    torch = pytest.importorskip("torch")
+    from skyops.airspace import train_gru as tg
+
+    small = type(airspace)(airspace.df[airspace.df.icao24.isin(airspace.aircraft()[:12])].copy(), name="small")
+    X, Y, M, G = tg.build_samples(small)
+    assert X.shape[1:] == (tg.K, tg.N_FEAT) and Y.shape[1:] == (len(tg.HORIZONS), 2) and M.shape == Y.shape[:2]
+    out = tg.make_model()(torch.tensor(X[:5]))
+    assert tuple(out.shape) == (5, len(tg.HORIZONS), 2)
+
+
 @pytest.mark.skipif(not HAS_CMAPSS, reason="C-MAPSS not downloaded")
 def test_fleet_status():
     from skyops.fleet.predict import engine_history, fleet_status
@@ -100,3 +145,12 @@ def test_api_roundtrip():
     brief = c.post("/api/mission/brief", json=dict(lat=19.08, lon=72.88, alt_m=100, radius_km=10, t_idx=3)).json()
     assert brief["verdict"] in ("GO", "CAUTION", "NO-GO")
     assert c.get("/api/assistant/status").status_code == 200
+    assert c.get("/api/airspace/snapshot/-1").json()["t_idx"] == 19
+    try:
+        assert c.post("/api/scenario", json={"name": "converging"}).json()["active"] == "converging"
+        assert sum(s["simulated"] for s in c.get("/api/airspace/snapshot/10").json()["states"]) == 2
+        assert c.post("/api/scenario", json={"name": "nope"}).status_code == 404
+    finally:
+        c.post("/api/scenario", json={"name": "baseline"})
+    m = c.get("/api/metrics").json()
+    assert "trajectory" in m and "fleet" in m and m["replay"]["snapshots"] == 20

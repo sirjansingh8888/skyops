@@ -6,6 +6,7 @@ Docs: http://127.0.0.1:8000/docs
 from __future__ import annotations
 
 import io
+import json
 from functools import lru_cache
 
 import numpy as np
@@ -15,7 +16,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from skyops import config
+from skyops import config, utm
+from skyops.airspace import loader, scenarios
 from skyops.airspace.airports import AIRPORTS
 from skyops.airspace.anomalies import anomaly_summary, detect_anomalies
 from skyops.airspace.conflicts import conflict_summary, detect_conflicts
@@ -24,38 +26,34 @@ from skyops.airspace.predict import evaluate, predict_at
 from skyops.config import settings
 from skyops.mission import mission_risk
 
-app = FastAPI(title="SkyOps", version="0.1.0", description="AI control tower for the drone era: airspace, perception, land use, fleet health.")
+app = FastAPI(title="SkyOps", version="0.2.0", description="AI control tower for the drone era: airspace, perception, land use, fleet health.")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-
-def _clip_t(t_idx: int) -> int:
-    A = get_airspace()
-    return int(np.clip(t_idx, 0, A.n_snapshots - 1))
 
 
 # ----------------------------------------------------------------------------- health
 @app.get("/api/health")
 def health() -> dict:
     A = get_airspace()
-    return dict(status="ok", snapshots=A.n_snapshots, aircraft=A.summary()["n_aircraft"], device=settings.device,
+    return dict(status="ok", airspace=A.name, snapshots=A.n_snapshots, aircraft=A.summary()["n_aircraft"], device=settings.device,
                 data=dict(visdrone=(config.VISDRONE_DIR / "VisDrone2019-DET-val").exists(), auair=(config.AUAIR_DIR / "annotations.json").exists(),
                           dubai=(config.DUBAI_DIR / "images").exists(), cmapss=config.CMAPSS_DIR.exists()),
                 models=dict(visdrone_yolo=(config.MODELS_DIR / "visdrone_yolo.pt").exists(), landuse_unet=(config.ROOT / settings.landuse_weights).exists(),
-                            rul_lgbm=(config.MODELS_DIR / "rul_lgbm" / "manifest.json").exists()))
+                            rul_lgbm=(config.MODELS_DIR / "rul_lgbm" / "manifest.json").exists(), traj_gru=(config.MODELS_DIR / "traj_gru.pt").exists()))
 
 
 # ----------------------------------------------------------------------------- airspace
 @app.get("/api/airspace/summary")
 def airspace_summary() -> dict:
     A = get_airspace()
-    return dict(**A.summary(), times=[int(t - A.t0) for t in A.times], airports=AIRPORTS)
+    return dict(**A.summary(), times=[int(t - A.t0) for t in A.times], airports=AIRPORTS, scenario=loader.active_name(),
+                scenario_notes=scenarios.notes(loader.active_name()))
 
 
 @app.get("/api/airspace/snapshot/{t_idx}")
 def airspace_snapshot(t_idx: int, predict: bool = True, horizons: str = "60,120,180,300") -> dict:
-    """Everything the map needs for one replay tick: states, predicted paths, conflicts, anomalies."""
+    """Everything the map needs for one tick: states, predicted paths, conflicts, anomalies, UTM alerts. t_idx=-1 means latest."""
     A = get_airspace()
-    t = _clip_t(t_idx)
+    t = A.clip(t_idx)
     snap = A.snapshot(t)
     hz = tuple(int(h) for h in horizons.split(",") if h.strip())
     pred = predict_at(A, t, horizons=hz) if predict else None
@@ -65,9 +63,10 @@ def airspace_snapshot(t_idx: int, predict: bool = True, horizons: str = "60,120,
             paths[icao] = [[round(float(r.longitude), 5), round(float(r.latitude), 5), round(float(r.altitude_m)), int(r.horizon_s)] for r in g.itertuples()]
     conflicts = detect_conflicts(snap, pred)
     anomalies = detect_anomalies(snap, A.snapshot(t - 1) if t > 0 else None)
-    return dict(t_idx=t, t_rel=int(A.times[t] - A.t0), snapshot_time=int(A.times[t]), n_snapshots=A.n_snapshots,
+    return dict(t_idx=t, t_rel=int(A.times[t] - A.t0), snapshot_time=int(A.times[t]), n_snapshots=A.n_snapshots, airspace=A.name,
                 states=to_records(snap), predicted=paths, conflicts=conflicts, conflict_summary=conflict_summary(conflicts),
-                anomalies=anomalies, anomaly_summary=anomaly_summary(anomalies))
+                anomalies=anomalies, anomaly_summary=anomaly_summary(anomalies), utm_alerts=utm.check_intrusions(A, t, pred),
+                missions=utm.list_missions())
 
 
 @app.get("/api/airspace/tracks")
@@ -86,14 +85,13 @@ def airspace_aircraft(icao24: str, t_idx: int | None = None) -> dict:
     tr = A.track(icao24)
     if tr.empty:
         raise HTTPException(404, f"unknown aircraft {icao24}")
-    t = _clip_t(t_idx if t_idx is not None else A.n_snapshots - 1)
-    pred = predict_at(A, t)
+    pred = predict_at(A, A.clip(t_idx))
     return dict(track=to_records(tr), predicted=pred[pred.icao24 == icao24].round(5).to_dict("records"))
 
 
 @lru_cache(maxsize=1)
 def _evaluation() -> dict:
-    return evaluate(get_airspace())
+    return evaluate(get_airspace("baseline"))
 
 
 @app.get("/api/airspace/evaluate")
@@ -101,7 +99,65 @@ def airspace_evaluate() -> dict:
     return _evaluation()
 
 
-# ----------------------------------------------------------------------------- mission
+# ----------------------------------------------------------------------------- scenarios and live feed
+class ScenarioRequest(BaseModel):
+    name: str
+
+
+@app.get("/api/scenarios")
+def scenario_list() -> dict:
+    return dict(active=loader.active_name(), scenarios=[dict(name=k, description=v) for k, v in scenarios.SCENARIOS.items()],
+                notes=scenarios.notes(loader.active_name()))
+
+
+@app.post("/api/scenario")
+def scenario_set(req: ScenarioRequest) -> dict:
+    from skyops.airspace.live import get_feed
+
+    if req.name not in scenarios.SCENARIOS:
+        raise HTTPException(404, f"unknown scenario {req.name}")
+    get_feed().stop()
+    A = loader.set_active(req.name)
+    return dict(active=A.name, notes=scenarios.notes(req.name), n_snapshots=A.n_snapshots)
+
+
+class LiveRequest(BaseModel):
+    interval_s: float | None = Field(None, ge=10, le=300)
+
+
+@app.post("/api/live/start")
+def live_start(req: LiveRequest) -> dict:
+    from skyops.airspace.live import get_feed
+
+    feed = get_feed()
+    if req.interval_s:
+        feed.interval_s = req.interval_s
+    try:
+        feed.start()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, f"live feed unavailable: {e}")
+    loader.set_active("live")
+    return feed.status()
+
+
+@app.post("/api/live/stop")
+def live_stop() -> dict:
+    from skyops.airspace.live import get_feed
+
+    get_feed().stop()
+    if loader.active_name() == "live":
+        loader.set_active("baseline")
+    return get_feed().status()
+
+
+@app.get("/api/live/status")
+def live_status() -> dict:
+    from skyops.airspace.live import get_feed
+
+    return dict(**get_feed().status(), active=loader.active_name() == "live")
+
+
+# ----------------------------------------------------------------------------- mission brief and UTM desk
 class MissionRequest(BaseModel):
     lat: float
     lon: float
@@ -133,6 +189,38 @@ def mission_brief(req: MissionRequest) -> dict:
         landuse.pop("cell_scores", None)
         out["landuse"] = landuse
     return out
+
+
+class RegisterRequest(BaseModel):
+    name: str = ""
+    lat: float
+    lon: float
+    radius_km: float = Field(1.0, gt=0, le=50)
+    ceiling_m: float = Field(120.0, gt=0, le=1000)
+    t_idx: int | None = None
+    force: bool = False
+
+
+@app.get("/api/utm/missions")
+def utm_missions() -> dict:
+    return dict(missions=utm.list_missions())
+
+
+@app.post("/api/utm/missions")
+def utm_register(req: RegisterRequest) -> dict:
+    return utm.register_mission(req.name, req.lat, req.lon, req.radius_km, req.ceiling_m, req.t_idx, req.force)
+
+
+@app.delete("/api/utm/missions/{mission_id}")
+def utm_remove(mission_id: str) -> dict:
+    if not utm.remove_mission(mission_id):
+        raise HTTPException(404, f"unknown mission {mission_id}")
+    return dict(removed=mission_id)
+
+
+@app.delete("/api/utm/missions")
+def utm_clear() -> dict:
+    return dict(removed=utm.clear_missions())
 
 
 # ----------------------------------------------------------------------------- fleet
@@ -246,6 +334,68 @@ async def landuse_segment(file: UploadFile = File(...)) -> dict:
     res, png = analyze_upload(img)
     res["image_png_base64"] = base64.b64encode(png).decode()
     return res
+
+
+# ----------------------------------------------------------------------------- metrics (model card)
+@lru_cache(maxsize=1)
+def _replay_stats() -> dict:
+    A = get_airspace("baseline")
+    tot = dict(critical=0, alert=0, warning=0, marginal=0)
+    pairs: set[str] = set()
+    n_anom = 0
+    for t in range(A.n_snapshots):
+        for c in detect_conflicts(A.snapshot(t), predict_at(A, t)):
+            tot[c["severity"]] += 1
+            if c["severity"] != "marginal":
+                pairs.add(c["id"])
+        n_anom += sum(a["severity"] != "info" for a in detect_anomalies(A.snapshot(t), A.snapshot(t - 1) if t else None))
+    return dict(snapshots=A.n_snapshots, conflict_flags=tot, distinct_conflict_pairs=len(pairs), anomaly_flags=n_anom)
+
+
+@lru_cache(maxsize=1)
+def _landuse_baseline_accuracy() -> float | None:
+    try:
+        from skyops.landuse.analyze import analyze_tile, tiles
+
+        acc = [analyze_tile(t).get("pixel_accuracy_vs_gt") for t in tiles()[:12]]
+        acc = [a for a in acc if a is not None]
+        return round(float(np.mean(acc)), 3) if acc else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/api/metrics")
+def metrics() -> dict:
+    """Numbers for the pitch: what each model is, how it was evaluated, and how well it does."""
+    out: dict = dict(trajectory=dict(**_evaluation(), note="error vs the aircraft's real later positions in the capture"), replay=_replay_stats())
+    gru_json = config.MODELS_DIR / "traj_gru.json"
+    if gru_json.exists():
+        out["trajectory"]["gru"] = json.loads(gru_json.read_text())
+    man = config.MODELS_DIR / "rul_lgbm" / "manifest.json"
+    if man.exists():
+        m = json.loads(man.read_text())
+        out["fleet"] = dict(model="LightGBM point + conformalised quantile offsets", test=m["test"], validation=m["val"],
+                            top_features=m["top_features"][:8], trained_seconds=m["trained_seconds"], baseline_knn_rmse_fd001=22.2)
+    else:
+        out["fleet"] = dict(model="k-NN fallback (no training)", note="run python -m skyops.fleet.train")
+    res_csv = config.ROOT / "runs" / "visdrone" / "results.csv"
+    perc: dict = dict(model="visdrone-finetuned YOLO" if (config.MODELS_DIR / "visdrone_yolo.pt").exists() else "COCO-pretrained YOLOv8n (placeholder)")
+    if res_csv.exists():
+        import pandas as pd
+
+        r = pd.read_csv(res_csv)
+        r.columns = [c.strip() for c in r.columns]
+        last = r.iloc[-1]
+        perc.update(epochs=int(last.get("epoch", len(r))), map50=float(last.get("metrics/mAP50(B)", float("nan"))),
+                    map50_95=float(last.get("metrics/mAP50-95(B)", float("nan"))))
+    out["perception"] = perc
+    lu_json = (config.ROOT / settings.landuse_weights).with_suffix(".json")
+    if lu_json.exists():
+        lm = json.loads(lu_json.read_text())
+        out["landuse"] = dict(model="U-Net ResNet-18", best_miou=lm["best_miou"], epochs=lm["epochs"], per_class_iou=lm["history"][-1]["iou"])
+    else:
+        out["landuse"] = dict(model="colour rules (placeholder)", pixel_accuracy=_landuse_baseline_accuracy())
+    return out
 
 
 # ----------------------------------------------------------------------------- assistant

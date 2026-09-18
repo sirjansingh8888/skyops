@@ -44,8 +44,20 @@ class Settings(BaseSettings):
     landuse_weights: str = "models/landuse_unet.pt"
     rul_model: str = "models/rul_lgbm.txt"
     assistant_model: str = "claude-opus-5"
+    opensky_csv: str | None = None            # replay another recording (see scripts/record_opensky.py)
+    opensky_client_id: str | None = None      # optional OpenSky API client for higher live-feed rate limits
+    opensky_client_secret: str | None = None
+    live_interval_s: float = 30.0
 
     model_config = SettingsConfigDict(env_prefix="SKYOPS_", env_file=str(ROOT / ".env"), extra="ignore")
 
 
 settings = Settings()
+
+
+def replay_csv() -> Path:
+    """The capture used for replay: SKYOPS_OPENSKY_CSV when set, else the organisers' file."""
+    if settings.opensky_csv:
+        p = Path(settings.opensky_csv)
+        return p if p.is_absolute() else ROOT / p
+    return OPENSKY_CSV

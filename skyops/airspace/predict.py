@@ -88,10 +88,74 @@ class DeadReckoningPredictor:
         return pd.concat(rows, ignore_index=True)
 
 
+class GRUCorrectedPredictor:
+    """Dead reckoning plus a learned residual correction (see train_gru.py). Falls back to pure dead
+    reckoning for aircraft with fewer than K airborne states in the history window."""
+
+    name = "dead-reckoning + GRU residual"
+
+    def __init__(self, weights):
+        import torch
+
+        from skyops.airspace import train_gru as tg  # lazy: train_gru imports this module
+
+        ck = torch.load(weights, map_location="cpu")
+        self.model = tg.make_model()
+        self.model.load_state_dict(ck["state_dict"])
+        self.model.eval()
+        self.k, self.h = int(ck["k"]), [int(x) for x in ck["horizons"]]
+        self.report = ck.get("report", {})
+        self.dr, self.torch, self.tg = DeadReckoningPredictor(), torch, tg
+
+    def predict(self, history: pd.DataFrame, horizons: tuple[int, ...] = config.PREDICTION_HORIZONS_S) -> pd.DataFrame:
+        base = self.dr.predict(history, horizons)
+        feats, ids = [], []
+        for icao, g in history.groupby("icao24", sort=False):
+            g = g[~g.on_ground].drop_duplicates("time_position").sort_values("time_position")
+            if len(g) >= self.k:
+                feats.append(self.tg.history_features(g))
+                ids.append(icao)
+        if not feats:
+            return base
+        with self.torch.no_grad():
+            res = self.model(self.torch.tensor(np.stack(feats))).numpy()  # (n, H, 2) residual km (east, north)
+        knots = np.array([0.0] + [float(x) for x in self.h])
+        corr = {icao: r for icao, r in zip(ids, res)}
+        out = base.copy()
+        for idx, row in out.iterrows():
+            r = corr.get(row.icao24)
+            if r is None:
+                continue
+            h = float(row.horizon_s)
+            scale = max(1.0, h / knots[-1])  # beyond the last trained horizon, grow the correction linearly
+            ce = float(np.interp(min(h, knots[-1]), knots, np.concatenate([[0.0], r[:, 0]]))) * scale
+            cn = float(np.interp(min(h, knots[-1]), knots, np.concatenate([[0.0], r[:, 1]]))) * scale
+            out.at[idx, "latitude"] = row.latitude + np.degrees(cn * 1000.0 / config.R_EARTH_M)
+            out.at[idx, "longitude"] = row.longitude + np.degrees(ce * 1000.0 / (config.R_EARTH_M * np.cos(np.radians(row.latitude))))
+        return out
+
+
+_PREDICTOR: Predictor | None = None
+
+
+def get_predictor() -> Predictor:
+    """The best available predictor: the GRU-corrected one when models/traj_gru.pt exists, else dead reckoning."""
+    global _PREDICTOR
+    if _PREDICTOR is None:
+        w = config.MODELS_DIR / "traj_gru.pt"
+        _PREDICTOR = DeadReckoningPredictor()
+        if w.exists():
+            try:
+                _PREDICTOR = GRUCorrectedPredictor(w)
+            except Exception as e:  # noqa: BLE001
+                print(f"[predict] could not load {w}: {e}; using dead reckoning")
+    return _PREDICTOR
+
+
 def predict_at(airspace: Airspace, t_idx: int, predictor: Predictor | None = None,
                horizons: tuple[int, ...] = config.PREDICTION_HORIZONS_S, history_n: int = 3) -> pd.DataFrame:
-    predictor = predictor or DeadReckoningPredictor()
-    hist = airspace.history(t_idx, n=history_n)
+    predictor = predictor or get_predictor()
+    hist = airspace.history(t_idx, n=max(history_n, int(getattr(predictor, "k", 0))))
     return predictor.predict(hist, horizons)
 
 
@@ -132,7 +196,7 @@ def evaluate(airspace: Airspace, predictor: Predictor | None = None, horizons: t
     errs: dict[int, list[float]] = {h: [] for h in horizons}
     tracks = {k: g.drop_duplicates("time_position").sort_values("time_position") for k, g in airspace.df.groupby("icao24")}
     for t_idx in range(start_idx, airspace.n_snapshots - 1):
-        hist = airspace.history(t_idx, n=3)
+        hist = airspace.history(t_idx, n=max(3, int(getattr(predictor, "k", 0))))
         pred = predictor.predict(hist, tuple(horizons))
         last = hist.groupby("icao24").tail(1).set_index("icao24")
         for h in horizons:

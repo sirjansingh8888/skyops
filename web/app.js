@@ -1,28 +1,32 @@
-/* SkyOps console: replay map (MapLibre + deck.gl), mission briefs, drone perception, land use, fleet, assistant. */
+/* SkyOps console: replay / scenario / live map (MapLibre + deck.gl), mission briefs and UTM geofences,
+   drone perception, land use, fleet, metrics, assistant. */
 'use strict';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const api = async (path, opts) => {
   const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}`);
+  if (!r.ok) { let d = ''; try { d = (await r.json()).detail || ''; } catch (e) { /* ignore */ } throw new Error(d || `${path} -> HTTP ${r.status}`); }
   return r.json();
 };
+const postJSON = (path, body, method = 'POST') => api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 const fmt = (n, d = 0) => (n === null || n === undefined || Number.isNaN(n) ? '–' : Number(n).toFixed(d));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const SEV_RGB = { critical: [239, 68, 68], alert: [251, 146, 60], warning: [245, 158, 11], marginal: [100, 116, 139], info: [100, 116, 139] };
 const LABEL_RGB = { pedestrian: [80, 220, 100], people: [80, 220, 100], bicycle: [250, 200, 60], car: [60, 160, 255], van: [60, 200, 255],
   truck: [255, 120, 60], tricycle: [200, 120, 255], 'awning-tricycle': [200, 120, 255], bus: [255, 80, 160], motor: [250, 230, 80] };
+const STATUS_RGB = { approved: [34, 197, 94], 'approved-with-caution': [245, 158, 11], forced: [251, 146, 60], rejected: [239, 68, 68] };
 
 const state = {
-  t: 0, n: 20, playing: false, timer: null, snapshots: {}, tracks: null, summary: null, selected: null,
-  conflictSet: new Set(), anomalySet: new Set(),
+  t: 0, n: 20, gen: 0, playing: false, timer: null, snapshots: {}, tracks: null, summary: null, selected: null,
+  conflictSet: new Set(), anomalySet: new Set(), intruderSet: new Set(), latest: null,
+  live: { on: false, timer: null },
   mission: { site: null, result: null, picking: false },
   drone: { frames: [], idx: 0, result: null, playing: false, timer: null },
   landuse: { tiles: [], tile: null, mode: 'overlay', result: null },
   fleet: { subset: 'FD001', data: null, unit: null },
-  assistant: { available: false, model: '' },
+  metrics: null, assistant: { available: false, model: '' },
 };
 
 // ------------------------------------------------------------------ map
@@ -57,12 +61,13 @@ async function initMap() {
 
 function tooltip({ object, layer }) {
   if (!object) return null;
+  const style = { background: '#0f1626', color: '#e5e7eb', fontSize: '12px', border: '1px solid #233047', borderRadius: '6px', padding: '6px 8px' };
   if (layer.id === 'aircraft') {
     const s = object;
-    return { html: `<b>${esc(s.callsign)}</b> · ${esc(s.origin_country)}<br>${fmt(s.altitude_ft)} ft · ${fmt(s.speed_kt)} kt · ${fmt(s.vs_fpm)} fpm · hdg ${fmt(s.true_track)}°${s.on_ground ? '<br>on ground' : ''}`,
-      style: { background: '#0f1626', color: '#e5e7eb', fontSize: '12px', border: '1px solid #233047', borderRadius: '6px', padding: '6px 8px' } };
+    return { html: `<b>${esc(s.callsign)}</b> · ${esc(s.origin_country)}${s.simulated ? ' (scenario)' : ''}<br>${fmt(s.altitude_ft)} ft · ${fmt(s.speed_kt)} kt · ${fmt(s.vs_fpm)} fpm · hdg ${fmt(s.true_track)}°${s.squawk ? ` · squawk ${esc(s.squawk)}` : ''}${s.on_ground ? '<br>on ground' : ''}`, style };
   }
   if (layer.id === 'detections') return { text: `${object.label} ${fmt(object.conf, 2)} · ${fmt(object.range_m)} m from drone` };
+  if (layer.id === 'geofences') return { html: `<b>${esc(object.name)}</b><br>${esc(object.status)} · r ${object.radius_km} km · ceiling ${object.ceiling_m} m<br>brief: ${object.brief.verdict} (${object.brief.score})`, style };
   if (layer.id === 'airport-labels' || layer.id.startsWith('airport-zones')) return { text: `${object.name} (${object.icao})` };
   return null;
 }
@@ -86,12 +91,13 @@ function altColor(s) {
 }
 function aircraftColor(s) {
   if (s.icao24 === state.selected) return [255, 255, 255, 255];
-  if (state.conflictSet.has(s.icao24)) return [239, 68, 68, 255];
+  if (state.conflictSet.has(s.icao24) || state.intruderSet.has(s.icao24) || s.squawk === '7700' || s.squawk === '7600' || s.squawk === '7500') return [239, 68, 68, 255];
   if (state.anomalySet.has(s.icao24)) return [245, 158, 11, 255];
+  if (s.simulated) return [192, 132, 252, 255];
   return altColor(s);
 }
 
-function currentSnap() { return state.snapshots[state.t]; }
+function currentSnap() { return state.latest; }
 
 function buildLayers() {
   const snap = currentSnap();
@@ -105,35 +111,44 @@ function buildLayers() {
     getColor: [196, 181, 253, 220], getPixelOffset: [0, -14], fontFamily: 'Inter, Segoe UI, sans-serif', pickable: true }));
 
   if (snap) {
+    const fences = (snap.missions || []).filter((m) => m.status !== 'rejected');
+    layers.push(new deck.ScatterplotLayer({ id: 'geofences', data: fences, getPosition: (m) => [m.lon, m.lat], getRadius: (m) => m.radius_km * 1000, radiusUnits: 'meters',
+      stroked: true, filled: true, getFillColor: (m) => [...(STATUS_RGB[m.status] || [34, 197, 94]), 28], getLineColor: (m) => [...(STATUS_RGB[m.status] || [34, 197, 94]), 220],
+      lineWidthMinPixels: 2, radiusMinPixels: 5, pickable: true }));
+    layers.push(new deck.TextLayer({ id: 'geofence-labels', data: fences, getPosition: (m) => [m.lon, m.lat], getText: (m) => m.name, getSize: 11, getColor: [187, 247, 208, 235],
+      getPixelOffset: [0, -16], fontFamily: 'Inter, Segoe UI, sans-serif' }));
     const tRel = snap.t_rel;
     if (state.tracks) {
       const trails = snap.states.map((s) => ({ path: (state.tracks[s.icao24] || []).filter((p) => p[3] <= tRel).slice(-8).map((p) => [p[0], p[1]]) })).filter((d) => d.path.length > 1);
       layers.push(new deck.PathLayer({ id: 'trails', data: trails, getPath: (d) => d.path, getColor: [148, 163, 184, 80], widthMinPixels: 1, widthMaxPixels: 2 }));
     }
+    const hot = (s) => state.conflictSet.has(s.icao24) || state.intruderSet.has(s.icao24);
     const preds = snap.states.filter((s) => snap.predicted[s.icao24] && !s.on_ground).map((s) => ({
-      path: [[s.longitude, s.latitude], ...snap.predicted[s.icao24].map((p) => [p[0], p[1]])],
-      color: state.conflictSet.has(s.icao24) ? [239, 68, 68, 170] : [56, 189, 248, 110] }));
-    layers.push(new deck.PathLayer({ id: 'predicted', data: preds, getPath: (d) => d.path, getColor: (d) => d.color, widthMinPixels: 1.2, updateTriggers: { getColor: [state.t] } }));
-    layers.push(new deck.LineLayer({ id: 'conflict-lines', data: snap.conflicts.filter((c) => c.severity !== 'marginal'),
-      getSourcePosition: (c) => [c.a.lon, c.a.lat], getTargetPosition: (c) => [c.b.lon, c.b.lat], getColor: (c) => [...SEV_RGB[c.severity], 230], getWidth: 2, widthUnits: 'pixels' }));
-    layers.push(new deck.ScatterplotLayer({ id: 'conflict-rings', data: snap.conflicts.filter((c) => c.severity !== 'marginal').flatMap((c) => [{ p: [c.a.lon, c.a.lat], s: c.severity }, { p: [c.b.lon, c.b.lat], s: c.severity }]),
+      path: [[s.longitude, s.latitude], ...snap.predicted[s.icao24].map((p) => [p[0], p[1]])], color: hot(s) ? [239, 68, 68, 170] : [56, 189, 248, 110] }));
+    layers.push(new deck.PathLayer({ id: 'predicted', data: preds, getPath: (d) => d.path, getColor: (d) => d.color, widthMinPixels: 1.2, updateTriggers: { getColor: [snap.snapshot_time] } }));
+    const real = snap.conflicts.filter((c) => c.severity !== 'marginal');
+    layers.push(new deck.LineLayer({ id: 'conflict-lines', data: real, getSourcePosition: (c) => [c.a.lon, c.a.lat], getTargetPosition: (c) => [c.b.lon, c.b.lat],
+      getColor: (c) => [...SEV_RGB[c.severity], 230], getWidth: 2, widthUnits: 'pixels' }));
+    layers.push(new deck.ScatterplotLayer({ id: 'conflict-rings', data: real.flatMap((c) => [{ p: [c.a.lon, c.a.lat], s: c.severity }, { p: [c.b.lon, c.b.lat], s: c.severity }]),
       getPosition: (d) => d.p, getRadius: 9, radiusUnits: 'pixels', stroked: true, filled: false, getLineColor: (d) => [...SEV_RGB[d.s], 200], lineWidthMinPixels: 1.5 }));
     layers.push(new deck.ScatterplotLayer({ id: 'anomaly-rings', data: snap.anomalies.filter((a) => a.severity !== 'info'), getPosition: (a) => [a.lon, a.lat], getRadius: 13, radiusUnits: 'pixels',
       stroked: true, filled: false, getLineColor: (a) => [...SEV_RGB[a.severity], 220], lineWidthMinPixels: 2 }));
+    layers.push(new deck.ScatterplotLayer({ id: 'utm-rings', data: snap.utm_alerts || [], getPosition: (a) => [a.lon, a.lat], getRadius: 16, radiusUnits: 'pixels',
+      stroked: true, filled: false, getLineColor: (a) => [...SEV_RGB[a.severity], 240], lineWidthMinPixels: 2.5 }));
     layers.push(new deck.IconLayer({ id: 'aircraft', data: snap.states, iconAtlas: ICON_URL, iconMapping: { plane: { x: 0, y: 0, width: 64, height: 64, mask: true } },
-      getIcon: () => 'plane', getPosition: (s) => [s.longitude, s.latitude], getSize: (s) => (s.icao24 === state.selected ? 30 : 20), sizeUnits: 'pixels',
+      getIcon: () => 'plane', getPosition: (s) => [s.longitude, s.latitude], getSize: (s) => (s.icao24 === state.selected ? 30 : s.simulated ? 26 : 20), sizeUnits: 'pixels',
       getAngle: (s) => 360 - (s.true_track || 0), getColor: aircraftColor, pickable: true, transitions: { getPosition: 800, getAngle: 800 },
-      updateTriggers: { getColor: [state.t, state.selected], getSize: [state.selected] } }));
+      updateTriggers: { getColor: [snap.snapshot_time, state.selected], getSize: [state.selected] } }));
     const zoom = map ? map.getZoom() : 4;
-    const labelled = snap.states.filter((s) => zoom >= 6.5 || s.icao24 === state.selected || state.conflictSet.has(s.icao24) || state.anomalySet.has(s.icao24));
+    const labelled = snap.states.filter((s) => zoom >= 6.5 || s.simulated || s.icao24 === state.selected || hot(s) || state.anomalySet.has(s.icao24));
     layers.push(new deck.TextLayer({ id: 'callsigns', data: labelled, getPosition: (s) => [s.longitude, s.latitude], getText: (s) => s.callsign, getSize: 11,
-      getColor: [229, 231, 235, 235], getPixelOffset: [0, 17], fontFamily: 'JetBrains Mono, Consolas, monospace', updateTriggers: { getText: [state.t] } }));
+      getColor: [229, 231, 235, 235], getPixelOffset: [0, 17], fontFamily: 'JetBrains Mono, Consolas, monospace', updateTriggers: { getText: [snap.snapshot_time] } }));
   }
 
   const site = state.mission.site;
   if (site) {
     layers.push(new deck.ScatterplotLayer({ id: 'mission-radius', data: [site], getPosition: (d) => [d.lon, d.lat], getRadius: site.radius_km * 1000, radiusUnits: 'meters',
-      stroked: true, filled: true, getFillColor: [34, 197, 94, 18], getLineColor: [34, 197, 94, 160], lineWidthMinPixels: 1.5 }));
+      stroked: true, filled: false, getLineColor: [148, 163, 184, 140], lineWidthMinPixels: 1 }));
     layers.push(new deck.ScatterplotLayer({ id: 'mission-site', data: [site], getPosition: (d) => [d.lon, d.lat], getRadius: 6, radiusUnits: 'pixels', getFillColor: [34, 197, 94, 255],
       stroked: true, getLineColor: [255, 255, 255, 200], lineWidthMinPixels: 1 }));
   }
@@ -152,27 +167,43 @@ function buildLayers() {
 
 function render() { if (overlay) overlay.setProps({ layers: buildLayers() }); }
 
-// ------------------------------------------------------------------ replay
+// ------------------------------------------------------------------ replay / scenario / live
 async function loadSnapshot(i) {
-  if (!state.snapshots[i]) state.snapshots[i] = await api(`/api/airspace/snapshot/${i}`);
+  const gen = state.gen;
+  if (!state.snapshots[i]) { const s = await api(`/api/airspace/snapshot/${i}`); if (gen === state.gen) state.snapshots[i] = s; else return s; }
   return state.snapshots[i];
 }
 
-async function showSnapshot(i) {
-  state.t = i;
-  const snap = await loadSnapshot(i);
+function applySnapshot(snap) {
+  state.latest = snap; state.t = snap.t_idx;
   state.conflictSet = new Set(snap.conflicts.filter((c) => c.severity !== 'marginal').flatMap((c) => [c.a.icao24, c.b.icao24]));
   state.anomalySet = new Set(snap.anomalies.filter((a) => a.severity !== 'info').map((a) => a.icao24));
-  $('#slider').value = i; $('#time-label').textContent = `T+${snap.t_rel} s · snapshot ${i + 1}/${snap.n_snapshots}`;
-  const cs = snap.conflict_summary, as = snap.anomaly_summary;
+  state.intruderSet = new Set((snap.utm_alerts || []).map((a) => a.icao24));
+  $('#slider').value = snap.t_idx;
+  $('#time-label').textContent = state.live.on ? `LIVE ${new Date(snap.snapshot_time * 1000).toISOString().slice(11, 19)} UTC · ${snap.n_snapshots} snapshots`
+    : `T+${snap.t_rel} s · snapshot ${snap.t_idx + 1}/${snap.n_snapshots}`;
+  const cs = snap.conflict_summary, as = snap.anomaly_summary, ua = snap.utm_alerts || [];
   const nConf = cs.critical + cs.alert + cs.warning, nAnom = as.critical + as.alert + as.warning;
   $('#chip-aircraft').textContent = `${snap.states.length} aircraft · ${snap.states.filter((s) => !s.on_ground).length} airborne`;
   const cc = $('#chip-conflicts'); cc.textContent = `${nConf} conflicts (${cs.critical} critical) · ${cs.marginal} marginal`; cc.className = 'chip ' + (cs.critical ? 'hot' : nConf ? 'warm' : 'ok');
   const ca = $('#chip-anomalies'); ca.textContent = `${nAnom} anomalies · ${as.info} info`; ca.className = 'chip ' + (as.critical ? 'hot' : nAnom ? 'warm' : 'ok');
-  renderLists(snap); renderAircraftCard(); render();
+  const cu = $('#chip-utm'); cu.textContent = `${ua.length} geofence alerts · ${(snap.missions || []).filter((m) => m.status !== 'rejected').length} active missions`;
+  cu.className = 'chip ' + (ua.some((a) => a.severity === 'critical') ? 'hot' : ua.length ? 'warm' : 'ok');
+  renderLists(snap); renderMissions(snap.missions || []); renderAircraftCard(); render();
 }
 
+async function showSnapshot(i) { applySnapshot(await loadSnapshot(i)); }
+
 function renderLists(snap) {
+  const uu = $('#utm-alerts'); uu.innerHTML = ''; const ua = snap.utm_alerts || [];
+  $('#utm-count').textContent = ua.length;
+  for (const a of ua) {
+    const li = document.createElement('li'); li.className = a.severity;
+    li.innerHTML = `<b>${esc(a.callsign)}</b> → <b>${esc(a.mission)}</b> · ${a.type === 'INTRUSION' ? 'inside geofence now' : `entry in ${a.t_entry_s} s`}<br><span class="muted">${esc(a.detail)}</span>`;
+    li.onclick = () => selectAircraft(a.icao24, true);
+    uu.appendChild(li);
+  }
+  if (!ua.length) uu.innerHTML = `<li class="info">${(snap.missions || []).length ? 'All registered geofences are clear.' : 'No missions registered. Use the Mission tab to register one.'}</li>`;
   const ul = $('#conflicts'); ul.innerHTML = '';
   $('#conf-count').textContent = snap.conflicts.length;
   for (const c of snap.conflicts) {
@@ -182,13 +213,13 @@ function renderLists(snap) {
     ul.appendChild(li);
   }
   if (!snap.conflicts.length) ul.innerHTML = '<li class="info">No conflicts at this snapshot.</li>';
-  const ua = $('#anomalies'); ua.innerHTML = '';
+  const ulA = $('#anomalies'); ulA.innerHTML = '';
   $('#anom-count').textContent = snap.anomalies.length;
   for (const a of snap.anomalies) {
     const li = document.createElement('li'); li.className = a.severity;
     li.innerHTML = `<b>${esc(a.callsign)}</b> · ${esc(a.type.toLowerCase().replace(/_/g, ' '))}<br><span class="muted">${esc(a.detail)}</span>`;
     li.onclick = () => selectAircraft(a.icao24, true);
-    ua.appendChild(li);
+    ulA.appendChild(li);
   }
 }
 
@@ -205,8 +236,9 @@ function renderAircraftCard() {
   if (!s) { el.innerHTML = '<div class="muted">Click an aircraft on the map to inspect it.</div>'; return; }
   const pred = (snap.predicted[s.icao24] || []).map((p) => `+${p[3]}s → ${p[1].toFixed(3)}, ${p[0].toFixed(3)} @ ${fmt(p[2] / 0.3048)} ft`).join('<br>');
   const flags = [...snap.conflicts.filter((c) => c.a.icao24 === s.icao24 || c.b.icao24 === s.icao24).map((c) => `conflict with ${c.a.icao24 === s.icao24 ? c.b.callsign : c.a.callsign} (${c.severity})`),
-    ...snap.anomalies.filter((a) => a.icao24 === s.icao24).map((a) => `${a.type.toLowerCase().replace(/_/g, ' ')}: ${a.detail}`)];
-  el.innerHTML = `<div class="card-title">${esc(s.callsign)} <span class="muted">${esc(s.icao24)} · ${esc(s.origin_country)}</span></div>
+    ...snap.anomalies.filter((a) => a.icao24 === s.icao24).map((a) => `${a.type.toLowerCase().replace(/_/g, ' ')}: ${a.detail}`),
+    ...(snap.utm_alerts || []).filter((a) => a.icao24 === s.icao24).map((a) => a.detail)];
+  el.innerHTML = `<div class="card-title">${esc(s.callsign)} <span class="muted">${esc(s.icao24)} · ${esc(s.origin_country)}</span>${s.simulated ? '<span class="badge sim">simulated</span>' : ''}</div>
     <div class="kv"><div><span>altitude</span>${fmt(s.altitude_ft)} ft</div><div><span>ground speed</span>${fmt(s.speed_kt)} kt</div><div><span>vertical</span>${fmt(s.vs_fpm)} fpm</div>
     <div><span>heading</span>${fmt(s.true_track)}°</div><div><span>squawk</span>${esc(s.squawk || '–')}</div><div><span>nearest airport</span>${fmt(s.airport_km)} km</div></div>
     ${flags.length ? `<ul class="reasons">${flags.map((f) => `<li class="warning">${esc(f)}</li>`).join('')}</ul>` : ''}
@@ -217,12 +249,53 @@ function renderAircraftCard() {
 }
 
 function play(on) {
+  if (state.live.on) on = false;
   state.playing = on; $('#btn-play').textContent = on ? '⏸ Pause' : '▶ Play';
   clearInterval(state.timer);
   if (on) state.timer = setInterval(() => showSnapshot((state.t + 1) % state.n), 1500);
 }
 
-// ------------------------------------------------------------------ mission
+async function resetReplay(keepT = true) {
+  state.gen += 1; state.snapshots = {}; state.tracks = null;
+  state.summary = await api('/api/airspace/summary');
+  state.n = state.summary.n_snapshots; $('#slider').max = Math.max(0, state.n - 1);
+  const notes = state.summary.scenario_notes || [];
+  $('#scenario-card').classList.toggle('hidden', !notes.length);
+  $('#scenario-notes').innerHTML = notes.map((n) => `<li class="warning">${esc(n)}</li>`).join('');
+  await showSnapshot(state.live.on ? -1 : Math.min(keepT ? state.t : 0, state.n - 1));
+  api('/api/airspace/tracks').then((d) => { state.tracks = d.tracks; render(); });
+  if (!state.live.on) { const gen = state.gen; (async () => { for (let i = 0; i < state.n && gen === state.gen; i++) await loadSnapshot(i); })(); }
+}
+
+async function initScenarios() {
+  const d = await api('/api/scenarios');
+  $('#scenario').innerHTML = d.scenarios.map((s) => `<option value="${s.name}" title="${esc(s.description)}">${s.name === 'baseline' ? 'Recorded traffic' : 'Scenario: ' + s.name}</option>`).join('');
+  $('#scenario').value = d.scenarios.some((s) => s.name === d.active) ? d.active : 'baseline';
+}
+
+async function setScenario(name) {
+  if (state.live.on) await setLive(false, true);
+  await postJSON('/api/scenario', { name });
+  await resetReplay(true);
+}
+
+async function setLive(on, silent = false) {
+  const btn = $('#btn-live');
+  clearInterval(state.live.timer);
+  if (on) {
+    btn.textContent = '● connecting…';
+    try { await postJSON('/api/live/start', {}); } catch (e) { btn.textContent = '● LIVE'; alert('Live feed unavailable: ' + e.message + '\nThe recorded replay keeps working.'); return; }
+    play(false); state.live.on = true; btn.classList.add('live'); btn.textContent = '■ LIVE'; $('#slider').disabled = true; $('#scenario').value = 'baseline';
+    await resetReplay(false);
+    state.live.timer = setInterval(async () => { state.gen += 1; state.snapshots = {}; try { applySnapshot(await api('/api/airspace/snapshot/-1')); api('/api/airspace/tracks').then((d) => { state.tracks = d.tracks; render(); }); } catch (e) { console.warn(e); } }, 10000);
+  } else {
+    state.live.on = false; btn.classList.remove('live'); btn.textContent = '● LIVE'; $('#slider').disabled = false;
+    try { await postJSON('/api/live/stop', {}); } catch (e) { /* ignore */ }
+    if (!silent) await resetReplay(false);
+  }
+}
+
+// ------------------------------------------------------------------ mission + UTM desk
 function setMissionSite() {
   const lat = parseFloat($('#m-lat').value), lon = parseFloat($('#m-lon').value), radius_km = parseFloat($('#m-radius').value) || 10;
   if (Number.isNaN(lat) || Number.isNaN(lon)) return;
@@ -233,12 +306,12 @@ function setMissionSite() {
 async function assessMission() {
   setMissionSite();
   const site = state.mission.site; if (!site) return;
-  const body = { lat: site.lat, lon: site.lon, alt_m: site.alt_m, radius_km: site.radius_km, t_idx: state.t, use_gt: $('#d-gt').checked };
+  const body = { lat: site.lat, lon: site.lon, alt_m: site.alt_m, radius_km: site.radius_km, t_idx: state.live.on ? -1 : state.t, use_gt: $('#d-gt').checked };
   if ($('#m-attach-frame').checked && state.drone.frames.length) body.frame = state.drone.frames[state.drone.idx].name;
   if ($('#m-attach-tile').checked && state.landuse.tile) body.tile = state.landuse.tile;
   const el = $('#mission-result'); el.innerHTML = '<div class="muted">Assessing…</div>';
   try {
-    const r = await api('/api/mission/brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await postJSON('/api/mission/brief', body);
     state.mission.result = r;
     const ac = r.traffic.aircraft.map((a) => `<tr><td>${esc(a.callsign)}</td><td>${fmt(a.altitude_ft)} ft</td><td>${fmt(a.speed_kt)} kt</td><td>${fmt(a.dist_km, 1)} km</td></tr>`).join('');
     el.innerHTML = `<div class="row"><span class="verdict ${r.verdict}">${r.verdict}</span><span class="muted">risk ${r.score}/100 · ${r.zone} zone · ${esc(r.airport.name)} ${r.airport.distance_km} km</span></div>
@@ -250,6 +323,32 @@ async function assessMission() {
     map.flyTo({ center: [site.lon, site.lat], zoom: Math.max(map.getZoom(), 8) });
     if (state.drone.result && $('#d-relocate').checked) loadDroneFrame();
   } catch (e) { el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+}
+
+async function refreshAfterMissionChange() { state.gen += 1; state.snapshots = {}; await showSnapshot(state.live.on ? -1 : state.t); if (!state.live.on) { const gen = state.gen; (async () => { for (let i = 0; i < state.n && gen === state.gen; i++) await loadSnapshot(i); })(); } }
+
+async function registerMission() {
+  setMissionSite(); const site = state.mission.site; if (!site) return;
+  try {
+    const m = await postJSON('/api/utm/missions', { name: $('#u-name').value.trim(), lat: site.lat, lon: site.lon, radius_km: parseFloat($('#u-radius').value) || 1.5,
+      ceiling_m: site.alt_m, t_idx: state.live.on ? -1 : state.t, force: $('#u-force').checked });
+    $('#u-name').value = '';
+    if (m.status === 'rejected') alert(`Registration rejected: brief is ${m.brief.verdict} (${m.brief.score}/100).\n${m.brief.reasons.map((r) => '• ' + r.text).join('\n')}\nTick "force" to override.`);
+    await refreshAfterMissionChange();
+  } catch (e) { alert(e.message); }
+}
+
+function renderMissions(missions) {
+  $('#missions-count').textContent = missions.length;
+  const ul = $('#missions'); ul.innerHTML = '';
+  for (const m of missions) {
+    const li = document.createElement('li'); li.className = m.status === 'rejected' ? 'critical' : m.status === 'approved' ? 'ok' : 'warning';
+    li.innerHTML = `<b>${esc(m.name)}</b> · <span class="state ${m.status === 'approved' ? 'healthy' : m.status === 'rejected' ? 'ground' : 'watch'}">${esc(m.status)}</span> <button class="link del" data-id="${m.id}">remove</button><br>
+      <span class="muted">${m.lat.toFixed(4)}, ${m.lon.toFixed(4)} · r ${m.radius_km} km · ceiling ${m.ceiling_m} m · brief ${m.brief.verdict} ${m.brief.score}/100 (${m.brief.zone} zone)</span>`;
+    li.onclick = (ev) => { if (ev.target.classList.contains('del')) return; map.flyTo({ center: [m.lon, m.lat], zoom: 10 }); };
+    ul.appendChild(li);
+  }
+  $$('#missions .del').forEach((b) => (b.onclick = async () => { await api(`/api/utm/missions/${b.dataset.id}`, { method: 'DELETE' }); await refreshAfterMissionChange(); }));
 }
 
 // ------------------------------------------------------------------ drone
@@ -335,7 +434,7 @@ async function loadEngine(unit) {
     <div class="muted small">${esc(e.action)}. Observed ${e.cycles_observed} cycles; predicted RUL ${e.rul_p50} (${e.rul_p10}–${e.rul_p90}), true ${e.rul_true}.</div>
     <div class="hint">Trending sensors: ${e.trending.map((t) => `${esc(t.name)} (${t.slope > 0 ? '+' : ''}${t.slope})`).join(', ')}</div>
     <div id="chart-rul"></div><div id="chart-sensors"></div>`;
-  svgChart($('#chart-rul'), { title: 'Remaining useful life (cycles)', x: h.cycles, series: [{ y: h.rul.p50, color: '#38bdf8', name: 'RUL p50' }], band: { lo: h.rul.p10, hi: h.rul.p90, color: 'rgba(56,189,248,0.18)' } });
+  svgChart($('#chart-rul'), { title: 'Remaining useful life (cycles), 80% band', x: h.cycles, series: [{ y: h.rul.p50, color: '#38bdf8', name: 'RUL p50' }], band: { lo: h.rul.p10, hi: h.rul.p90, color: 'rgba(56,189,248,0.18)' } });
   const keys = ['s4', 's11', 's12', 's15'];
   svgChart($('#chart-sensors'), { title: 'Normalised sensors', x: h.cycles, series: keys.map((k, i) => ({ y: h.sensors[k], color: ['#f59e0b', '#a78bfa', '#22c55e', '#f472b6'][i], name: h.sensor_names[k] })) });
 }
@@ -351,8 +450,35 @@ function svgChart(el, { title, x, series, band, w = 410, h = 190 }) {
   if (band) svg += `<path d="${path(band.hi)} ${band.lo.map((v, i) => `L${sx(x[band.lo.length - 1 - i]).toFixed(1)},${sy(band.lo[band.lo.length - 1 - i]).toFixed(1)}`).join(' ')} Z" fill="${band.color}"/>`;
   series.forEach((s) => { svg += `<path d="${path(s.y)}" fill="none" stroke="${s.color}" stroke-width="1.6"/>`; });
   svg += `<text x="4" y="${sy(ymax) + 4}">${ymax.toFixed(1)}</text><text x="4" y="${sy(ymin)}">${ymin.toFixed(1)}</text><text x="${sx(xmin)}" y="${h - 6}">cycle ${xmin}</text><text x="${sx(xmax) - 50}" y="${h - 6}">cycle ${xmax}</text>`;
-  svg += series.map((s, i) => `<text x="${w - pad.r - 130}" y="${14 + i * 11}" fill="${s.color}" style="fill:${s.color}">${esc(s.name).slice(0, 26)}</text>`).join('');
+  svg += series.map((s, i) => `<text x="${w - pad.r - 130}" y="${14 + i * 11}" style="fill:${s.color}">${esc(s.name).slice(0, 26)}</text>`).join('');
   el.innerHTML = svg + '</svg>';
+}
+
+// ------------------------------------------------------------------ metrics (model card)
+async function loadMetrics() {
+  const el = $('#metrics-body');
+  try {
+    const m = await api('/api/metrics'); state.metrics = m;
+    const th = m.trajectory.horizons;
+    const trajRows = Object.entries(th).map(([h, v]) => `<tr><td>+${h} s</td><td>${fmt(v.median_m)} m</td><td>${fmt(v.mean_m)} m</td><td>${fmt(v.p90_m)} m</td><td class="muted">${v.n}</td></tr>`).join('');
+    const rp = m.replay;
+    let fleet = `<div class="muted small">${esc(m.fleet.model)}${m.fleet.note ? ' · ' + esc(m.fleet.note) : ''}</div>`;
+    if (m.fleet.test) {
+      fleet += `<table><thead><tr><th>Subset</th><th>RMSE</th><th>MAE</th><th>NASA score</th><th>80% band coverage</th><th>Engines</th></tr></thead><tbody>${Object.entries(m.fleet.test).map(([k, v]) =>
+        `<tr><td>${k}</td><td><b>${fmt(v.rmse, 1)}</b></td><td>${fmt(v.mae, 1)}</td><td>${fmt(v.nasa_score)}</td><td>${fmt(v.interval_coverage * 100)}% (±${fmt(v.interval_width / 2, 0)})</td><td class="muted">${v.n}</td></tr>`).join('')}</tbody></table>
+        <div class="hint">Training-free k-NN baseline: RMSE ${m.fleet.baseline_knn_rmse_fd001} on FD001. Top features: ${m.fleet.top_features.map((f) => esc(f.feature)).join(', ')}. Trained in ${m.fleet.trained_seconds} s on CPU.</div>`;
+    }
+    const p = m.perception, lu = m.landuse;
+    el.innerHTML = `<div class="card"><div class="card-title">Trajectory prediction <span class="muted">${esc(m.trajectory.predictor)}</span></div>
+        <table><thead><tr><th>Horizon</th><th>Median</th><th>Mean</th><th>p90</th><th>n</th></tr></thead><tbody>${trajRows}</tbody></table><div class="hint">${esc(m.trajectory.note)}.</div></div>
+      <div class="card"><div class="card-title">Replay statistics</div><div class="kv"><div><span>snapshots</span>${rp.snapshots}</div><div><span>distinct conflict pairs</span>${rp.distinct_conflict_pairs}</div><div><span>anomaly flags</span>${rp.anomaly_flags}</div>
+        <div><span>critical</span>${rp.conflict_flags.critical}</div><div><span>alert / warning</span>${rp.conflict_flags.alert} / ${rp.conflict_flags.warning}</div><div><span>marginal (RVSM noise)</span>${rp.conflict_flags.marginal}</div></div></div>
+      <div class="card"><div class="card-title">Fleet RUL</div>${fleet}</div>
+      <div class="card"><div class="card-title">Drone perception</div><div class="muted small">${esc(p.model)}</div>${p.map50 !== undefined ? `<div class="kv"><div><span>mAP@50</span>${fmt(p.map50, 3)}</div><div><span>mAP@50-95</span>${fmt(p.map50_95, 3)}</div><div><span>epochs</span>${p.epochs}</div></div>` : '<div class="hint">Fine-tune on VisDrone to replace the placeholder (GPU run pending).</div>'}</div>
+      <div class="card"><div class="card-title">Land use</div><div class="muted small">${esc(lu.model)}</div>${lu.best_miou !== undefined ? `<div class="kv"><div><span>mIoU</span>${fmt(lu.best_miou, 3)}</div><div><span>epochs</span>${lu.epochs}</div></div>` : `<div class="hint">Placeholder pixel accuracy ${lu.pixel_accuracy !== null ? fmt(lu.pixel_accuracy * 100) + '%' : '–'}; U-Net training pending (GPU).</div>`}</div>`;
+    const h60 = th['60'], h120 = th['120'];
+    if (h60) $('#eval-line').textContent = `${m.trajectory.predictor}: median error ${fmt(h60.median_m)} m @60 s · ${fmt(h120.median_m)} m @120 s (n=${h60.n})`;
+  } catch (e) { el.innerHTML = `<div class="card"><div class="msg err">${esc(e.message)}</div></div>`; }
 }
 
 // ------------------------------------------------------------------ assistant
@@ -371,13 +497,13 @@ async function sendChat(text) {
   if (!text.trim()) return;
   addMsg('user', esc(text)); $('#chat-input').value = '';
   const wait = addMsg('bot', '<span class="muted">Consulting the tower…</span>');
-  const ctx = {};
+  const ctx = { airspace: state.latest ? state.latest.airspace : 'baseline' };
   if (state.mission.site) ctx.mission_site = state.mission.site;
   if (state.drone.frames.length) ctx.current_drone_frame = state.drone.frames[state.drone.idx].name;
   if (state.landuse.tile) ctx.current_landuse_tile = state.landuse.tile;
   if (state.selected) ctx.selected_aircraft_icao24 = state.selected;
   try {
-    const r = await api('/api/assistant/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, t_idx: state.t, context: ctx }) });
+    const r = await postJSON('/api/assistant/chat', { message: text, t_idx: state.t, context: ctx });
     if (r.error) { wait.className = 'msg err'; wait.textContent = r.error; return; }
     wait.innerHTML = esc(r.answer || '(no answer)') + (r.tool_calls.length ? `<div class="tools">${r.tool_calls.map((t) => `<span>${esc(t.name)}</span>`).join('')}</div>` : '') + `<div class="hint">${r.model} · ${r.seconds}s</div>`;
   } catch (e) { wait.className = 'msg err'; wait.textContent = e.message; }
@@ -388,14 +514,19 @@ function switchTab(name) {
   $$('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${name}`));
   if (name === 'fleet' && !state.fleet.data) loadFleet();
+  if (name === 'metrics' && !state.metrics) loadMetrics();
 }
 
 function wire() {
   $$('.tabs button').forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
   $('#btn-play').onclick = () => play(!state.playing);
+  $('#btn-live').onclick = () => setLive(!state.live.on);
+  $('#scenario').onchange = (e) => setScenario(e.target.value);
   $('#slider').oninput = (e) => { play(false); showSnapshot(parseInt(e.target.value)); };
   $('#m-pick').onclick = () => { state.mission.picking = !state.mission.picking; $('#m-pick').classList.toggle('active', state.mission.picking); };
   $('#m-assess').onclick = assessMission;
+  $('#u-register').onclick = registerMission;
+  $('#u-clear').onclick = async () => { await api('/api/utm/missions', { method: 'DELETE' }); await refreshAfterMissionChange(); };
   ['#m-lat', '#m-lon', '#m-radius', '#m-alt'].forEach((s) => ($(s).onchange = setMissionSite));
   $$('#tab-mission .presets .link').forEach((b) => (b.onclick = () => { const [la, lo] = b.dataset.site.split(','); $('#m-lat').value = la; $('#m-lon').value = lo; setMissionSite(); assessMission(); }));
   $('#d-slider').oninput = (e) => { state.drone.idx = parseInt(e.target.value); loadDroneFrame(); };
@@ -408,22 +539,22 @@ function wire() {
   $$('#tab-landuse .seg button').forEach((b) => (b.onclick = () => { $$('#tab-landuse .seg button').forEach((x) => x.classList.remove('active')); b.classList.add('active'); state.landuse.mode = b.dataset.mode; loadTile(); }));
   $('#fleet-subset').onchange = (e) => { state.fleet.subset = e.target.value; loadFleet(); };
   $('#chat-form').onsubmit = (e) => { e.preventDefault(); sendChat($('#chat-input').value); };
-  $('#chat-reset').onclick = async () => { $('#chat').innerHTML = ''; await api('/api/assistant/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'Conversation reset. Reply with one short line acknowledging.', reset: true, t_idx: state.t }) }).catch(() => {}); };
+  $('#chat-reset').onclick = async () => { $('#chat').innerHTML = ''; await postJSON('/api/assistant/chat', { message: 'Conversation reset. Reply with one short line acknowledging.', reset: true, t_idx: state.t }).catch(() => {}); };
   $$('#tab-assistant .presets .link').forEach((b) => (b.onclick = () => { $('#chat-input').value = b.dataset.q; sendChat(b.dataset.q); }));
 }
 
 async function main() {
   wire();
   await initMap();
-  state.summary = await api('/api/airspace/summary');
-  state.n = state.summary.n_snapshots; $('#slider').max = state.n - 1;
-  await showSnapshot(0);
-  api('/api/airspace/tracks').then((d) => { state.tracks = d.tracks; render(); });
-  (async () => { for (let i = 1; i < state.n; i++) await loadSnapshot(i); })();
+  await initScenarios();
+  const live = await api('/api/live/status').catch(() => ({ active: false }));
+  if (live.active) { state.live.on = true; $('#btn-live').classList.add('live'); $('#btn-live').textContent = '■ LIVE'; $('#slider').disabled = true;
+    state.live.timer = setInterval(async () => { state.gen += 1; state.snapshots = {}; try { applySnapshot(await api('/api/airspace/snapshot/-1')); } catch (e) { console.warn(e); } }, 10000); }
+  await resetReplay(false);
   api('/api/airspace/evaluate').then((ev) => { const h = ev.horizons; $('#eval-line').textContent = `${ev.predictor}: median error ${fmt(h['60'].median_m)} m @60 s · ${fmt(h['120'].median_m)} m @120 s · ${fmt(h['300'] ? h['300'].median_m : NaN)} m @300 s (n=${h['60'].n})`; }).catch(() => {});
   setMissionSite();
   initAssistant(); initDrone(); initLanduse();
-  setTimeout(() => play(true), 1200);
+  if (!state.live.on) setTimeout(() => play(true), 1200);
 }
 
 main().catch((e) => { console.error(e); alert('SkyOps failed to start: ' + e.message); });

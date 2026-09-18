@@ -74,9 +74,12 @@ class LightGBMRUL:
 
     def predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         p50 = self.b["p50"].predict(X)
-        p10 = np.minimum(self.b["p10"].predict(X), p50)
-        p90 = np.maximum(self.b["p90"].predict(X), p50)
-        return np.clip(p50, 0, None), np.clip(p10, 0, None), np.clip(p90, 0, None)
+        lo, hi = self.b["p10"].predict(X), self.b["p90"].predict(X)
+        if self.manifest.get("quantile_mode") == "offset":  # quantile boosters predict offsets around p50
+            q = float(self.manifest.get("conformal_q", 0.0))  # conformal widening to reach nominal coverage
+            lo, hi = p50 + lo - q, p50 + hi + q
+        p10, p90 = np.minimum(lo, p50), np.maximum(hi, p50)
+        return np.clip(p50, 0, None), np.clip(p10, 0, None), np.clip(p90, 0, 130.0)
 
 
 @lru_cache(maxsize=1)
