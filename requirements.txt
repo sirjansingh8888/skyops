@@ -1,0 +1,31 @@
+# --- core data / ML ---
+numpy>=1.26,<2.3
+pandas>=2.1
+scipy>=1.10
+scikit-learn>=1.4
+lightgbm>=4.3
+pyarrow>=16
+openpyxl>=3.1
+tqdm>=4.66
+requests>=2.31
+python-dotenv>=1.0
+# --- API ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pydantic>=2.5
+pydantic-settings>=2.1
+# --- vision / geo ---
+pillow>=10
+opencv-python-headless>=4.9
+matplotlib>=3.7
+shapely>=2.0
+pyproj>=3.6
+# --- LLM assistant ---
+anthropic>=0.40
+# --- tests ---
+pytest>=8
+# --- deep learning (torch/torchvision are installed separately, see README: CPU vs CUDA 12.8 wheels) ---
+ultralytics>=8.3
+segmentation-models-pytorch>=0.4
+timm>=1.0

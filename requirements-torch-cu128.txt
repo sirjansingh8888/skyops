@@ -1,0 +1,4 @@
+# For NVIDIA RTX 50-series (Blackwell, sm_120) and any CUDA 12.8 capable driver: torch >= 2.7 is required.
+--index-url https://download.pytorch.org/whl/cu128
+torch>=2.7
+torchvision>=0.22

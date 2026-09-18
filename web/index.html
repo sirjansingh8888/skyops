@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SkyOps Control Tower</title>
+<link rel="stylesheet" href="vendor/maplibre-gl.css"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><span class="logo">✈</span><b>SkyOps</b><span class="sub">AI control tower for the drone era</span></div>
+  <div class="chips">
+    <span class="chip" id="chip-aircraft">… aircraft</span>
+    <span class="chip" id="chip-conflicts">… conflicts</span>
+    <span class="chip" id="chip-anomalies">… anomalies</span>
+    <span class="chip" id="chip-model">predictor: dead-reckoning</span>
+    <span class="chip" id="chip-assistant">assistant: …</span>
+  </div>
+  <div class="replay">
+    <button id="btn-play" class="btn primary">▶ Play</button>
+    <input type="range" id="slider" min="0" max="19" value="0"/>
+    <span id="time-label" class="mono">T+0 s</span>
+  </div>
+</header>
+
+<main>
+  <div id="map"></div>
+  <div id="legend" class="legend">
+    <div><i style="background:#38bdf8"></i>aircraft (colour = altitude)</div>
+    <div><i style="background:#ef4444"></i>loss of separation</div>
+    <div><i style="background:#f59e0b"></i>predicted conflict / anomaly</div>
+    <div><i style="background:#22c55e"></i>mission site · drone</div>
+    <div><i style="background:#a78bfa"></i>airport 5 / 12 km zones</div>
+  </div>
+
+  <aside id="panel">
+    <nav class="tabs">
+      <button data-tab="airspace" class="active">Airspace</button>
+      <button data-tab="mission">Mission</button>
+      <button data-tab="drone">Drone</button>
+      <button data-tab="landuse">Land use</button>
+      <button data-tab="fleet">Fleet</button>
+      <button data-tab="assistant">Assistant</button>
+    </nav>
+
+    <section id="tab-airspace" class="tab active">
+      <div class="card" id="ac-card"><div class="muted">Click an aircraft on the map to inspect it.</div></div>
+      <div class="card">
+        <div class="card-title">Trajectory predictor <span class="muted" id="eval-line">evaluating…</span></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Separation conflicts <span class="badge" id="conf-count">0</span></div>
+        <ul class="list" id="conflicts"></ul>
+      </div>
+      <div class="card">
+        <div class="card-title">Anomalies <span class="badge" id="anom-count">0</span></div>
+        <ul class="list" id="anomalies"></ul>
+      </div>
+    </section>
+
+    <section id="tab-mission" class="tab">
+      <div class="card">
+        <div class="card-title">Is it safe to fly here, now?</div>
+        <div class="grid2">
+          <label>Latitude <input id="m-lat" type="number" step="0.0001" value="28.6100"/></label>
+          <label>Longitude <input id="m-lon" type="number" step="0.0001" value="77.0500"/></label>
+          <label>Altitude AGL (m) <input id="m-alt" type="number" value="100"/></label>
+          <label>Radius (km) <input id="m-radius" type="number" value="10"/></label>
+        </div>
+        <div class="row">
+          <button id="m-pick" class="btn">📍 Pick on map</button>
+          <button id="m-assess" class="btn primary">Assess mission</button>
+        </div>
+        <div class="row small">
+          <label><input type="checkbox" id="m-attach-frame" checked/> attach current drone frame</label>
+          <label><input type="checkbox" id="m-attach-tile"/> attach current land-use tile</label>
+        </div>
+        <div class="row small presets">
+          <span class="muted">Presets:</span>
+          <button class="link" data-site="28.6100,77.0500">Delhi (near IGI)</button>
+          <button class="link" data-site="12.9692,79.1559">VIT Vellore</button>
+          <button class="link" data-site="19.0760,72.8777">Mumbai</button>
+          <button class="link" data-site="13.0827,80.2707">Chennai</button>
+        </div>
+      </div>
+      <div class="card" id="mission-result"><div class="muted">No assessment yet.</div></div>
+    </section>
+
+    <section id="tab-drone" class="tab">
+      <div class="card">
+        <div class="card-title">Drone camera + telemetry <span class="muted" id="drone-source"></span></div>
+        <div class="row">
+          <button id="d-play" class="btn">▶ Play flight</button>
+          <input type="range" id="d-slider" min="0" max="0" value="0"/>
+          <span id="d-index" class="mono">0/0</span>
+        </div>
+        <img id="drone-img" alt="drone frame" class="frame"/>
+        <div class="row small">
+          <label><input type="checkbox" id="d-gt"/> use dataset boxes (ground truth)</label>
+          <label><input type="checkbox" id="d-relocate" checked/> relocate flight to mission site</label>
+        </div>
+        <div class="grid2 small">
+          <label>Camera tilt (deg) <input id="d-tilt" type="range" min="10" max="90" value="45"/><span id="d-tilt-v" class="mono">45</span></label>
+          <label>Horizontal FOV (deg) <input id="d-hfov" type="range" min="30" max="110" value="69"/><span id="d-hfov-v" class="mono">69</span></label>
+        </div>
+        <div id="drone-info" class="kv"></div>
+      </div>
+      <div class="card" id="landing-card"><div class="muted">Landing-zone assessment appears here.</div></div>
+    </section>
+
+    <section id="tab-landuse" class="tab">
+      <div class="card">
+        <div class="card-title">Land use for emergency landing <span class="muted" id="lu-model"></span></div>
+        <div class="row">
+          <select id="lu-tile"></select>
+          <div class="seg">
+            <button data-mode="image">image</button>
+            <button data-mode="overlay" class="active">overlay</button>
+            <button data-mode="mask">mask</button>
+            <button data-mode="gt">truth</button>
+          </div>
+        </div>
+        <img id="lu-img" alt="land use tile" class="frame"/>
+        <div id="lu-bars" class="bars"></div>
+        <div id="lu-legend" class="legend-inline"></div>
+      </div>
+      <div class="card" id="lu-assess"><div class="muted">Assessment appears here.</div></div>
+    </section>
+
+    <section id="tab-fleet" class="tab">
+      <div class="card">
+        <div class="card-title">Engine fleet health (C-MAPSS) <span class="muted" id="fleet-model"></span></div>
+        <div class="row">
+          <select id="fleet-subset">
+            <option value="FD001">FD001 · 1 condition, HPC fault</option>
+            <option value="FD002">FD002 · 6 conditions, HPC fault</option>
+            <option value="FD003">FD003 · 1 condition, HPC + fan</option>
+            <option value="FD004">FD004 · 6 conditions, HPC + fan</option>
+          </select>
+          <span id="fleet-counts" class="counts"></span>
+        </div>
+        <div class="table-wrap"><table id="fleet-table"><thead><tr><th>Engine</th><th>Cycles</th><th>RUL p50</th><th>p10–p90</th><th>Truth</th><th>State</th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="card" id="engine-card"><div class="muted">Select an engine to see its degradation curve.</div></div>
+    </section>
+
+    <section id="tab-assistant" class="tab">
+      <div class="card chat-card">
+        <div class="card-title">Ops assistant <span class="muted" id="assist-model"></span></div>
+        <div class="presets">
+          <button class="link" data-q="Can I launch a drone at the mission site right now?">Launch check</button>
+          <button class="link" data-q="Which aircraft pairs are in conflict and what should ATC do first?">Conflicts</button>
+          <button class="link" data-q="Which engines should be grounded this week and why?">Grounding list</button>
+          <button class="link" data-q="Assess the current drone camera frame for a safe landing.">Camera check</button>
+          <button class="link" data-q="Any abnormal aircraft behaviour right now?">Anomalies</button>
+        </div>
+        <div id="chat" class="chat"></div>
+        <form id="chat-form" class="row">
+          <input id="chat-input" type="text" placeholder="Ask the tower…" autocomplete="off"/>
+          <button class="btn primary" type="submit">Send</button>
+          <button class="btn" type="button" id="chat-reset" title="New conversation">↺</button>
+        </form>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script src="vendor/deck.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

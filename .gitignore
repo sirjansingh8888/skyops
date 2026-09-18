@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+# Secrets
+.env
+# Data and weights (re-download with scripts/download_data.py)
+data/raw/
+data/processed/
+models/
+runs/
+*.pt
+*.pth
+*.onnx
+*.zip
+*.log
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
