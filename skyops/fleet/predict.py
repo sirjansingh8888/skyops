@@ -70,7 +70,10 @@ class LightGBMRUL:
         self.manifest = json.loads((model_dir / "manifest.json").read_text())
         self.cols = self.manifest["features"]
         self.stats = self.manifest["stats"]
-        self.b = {q: lgb.Booster(model_file=str(model_dir / f"{q}.txt")) for q in ("p50", "p10", "p90")}
+        # Load from a string with line endings normalised: a checkout with CRLF conversion (Git on Windows without
+        # the repo's .gitattributes) would otherwise make LightGBM abort with "Model format error".
+        self.b = {q: lgb.Booster(model_str=(model_dir / f"{q}.txt").read_text(encoding="utf-8").replace("\r\n", "\n"))
+                  for q in ("p50", "p10", "p90")}
 
     def predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         p50 = self.b["p50"].predict(X)

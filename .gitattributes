@@ -1,0 +1,7 @@
+# Trained model files must stay byte-exact. With Git's Windows default (core.autocrlf=true) the LightGBM
+# text boosters would be checked out with CRLF line endings, which LightGBM's parser rejects fatally.
+models/** -text
+*.pt binary
+*.pth binary
+# vendored, minified libraries: no point normalising them
+web/vendor/** -text
