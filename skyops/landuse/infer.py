@@ -52,7 +52,7 @@ class UNetSegmenter:
 
         ck = torch.load(weights, map_location=device)
         self.model = smp.Unet(ck.get("encoder", "resnet18"), encoder_weights=None, classes=len(ck.get("classes", CLASSES)))
-        self.model.load_state_dict(ck["state_dict"])
+        self.model.load_state_dict({k: (v.float() if v.is_floating_point() else v) for k, v in ck["state_dict"].items()})
         self.model.eval().to(device)
         self.device = device
         self.torch = torch

@@ -21,8 +21,8 @@ opencv-python-headless>=4.9
 matplotlib>=3.7
 shapely>=2.0
 pyproj>=3.6
-# --- LLM assistant ---
-anthropic>=0.40
+# --- LLM assistant (Gemini free tier by default; `pip install anthropic` only if you switch the provider to claude) ---
+google-genai>=2.0
 # --- tests ---
 pytest>=8
 # --- deep learning (torch/torchvision are installed separately, see README: CPU vs CUDA 12.8 wheels) ---

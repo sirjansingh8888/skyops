@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[1]
+# The LLM SDKs read their keys (GEMINI_API_KEY / ANTHROPIC_API_KEY) from the process environment, so load .env into it.
+load_dotenv(ROOT / ".env")
 DATA_RAW = ROOT / "data" / "raw"
 DATA_PROCESSED = ROOT / "data" / "processed"
 MODELS_DIR = ROOT / "models"
@@ -43,7 +46,10 @@ class Settings(BaseSettings):
     yolo_weights: str = "yolov8n.pt"  # replaced by models/visdrone_yolo.pt after fine-tuning
     landuse_weights: str = "models/landuse_unet.pt"
     rul_model: str = "models/rul_lgbm.txt"
-    assistant_model: str = "claude-opus-5"
+    assistant_provider: str = "gemini"        # "gemini" (free tier, default) or "claude"
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_fallback_model: str = "gemini-3.5-flash-lite"  # used once when the main model returns 429 / 503
+    claude_model: str = "claude-opus-5"
     opensky_csv: str | None = None            # replay another recording (see scripts/record_opensky.py)
     opensky_client_id: str | None = None      # optional OpenSky API client for higher live-feed rate limits
     opensky_client_secret: str | None = None

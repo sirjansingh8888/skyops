@@ -11,11 +11,11 @@ venv/
 # Data and weights (re-download with scripts/download_data.py)
 data/raw/
 data/processed/
-# weights stay out of git, except the small text-based RUL boosters so a fresh clone has a trained fleet model
-models/*
-!models/rul_lgbm/
+# trained SkyOps weights in models/ ARE tracked (all under 60 MB) so a fresh clone runs fully trained;
+# training runs and pretrained checkpoints downloaded to the repo root are not
 runs/
-*.pt
+/weights/
+/*.pt
 *.pth
 *.onnx
 *.zip

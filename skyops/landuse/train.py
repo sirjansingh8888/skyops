@@ -70,7 +70,9 @@ def train(epochs: int, size: int, batch: int, lr: float, device: str, out: Path,
         if miou > best:
             best = miou
             out.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(dict(state_dict=model.state_dict(), encoder="resnet18", classes=CLASSES, size=size), out)
+            # half precision halves the file (about 28 MB) so the weights can live in git; infer.py casts back to float
+            half = {k: (v.half() if v.is_floating_point() else v) for k, v in model.state_dict().items()}
+            torch.save(dict(state_dict=half, encoder="resnet18", classes=CLASSES, size=size), out)
     manifest = dict(kind="unet-resnet18", best_miou=best, epochs=epochs, size=size, seconds=round(time.time() - t0, 1),
                     history=history, val_tiles=[p[0].name for p in val_pairs])
     out.with_suffix(".json").write_text(json.dumps(manifest, indent=2))

@@ -408,11 +408,13 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/assistant/chat")
 def assistant_chat(req: ChatRequest) -> dict:
-    from skyops.assistant.agent import available, get_assistant
+    from skyops import assistant
 
-    if not available():
-        return dict(error="Assistant offline: set ANTHROPIC_API_KEY in skyops/.env and restart.", answer=None, tool_calls=[])
-    a = get_assistant()
+    st = assistant.status()
+    if not st["available"]:
+        return dict(error=f"Assistant offline: put {st['key_env']}=... in skyops/.env and restart the server (see HANDOFF.md).",
+                    answer=None, tool_calls=[])
+    a = assistant.get_assistant()
     if req.reset:
         a.reset()
     return a.ask(req.message, t_idx=req.t_idx, context=req.context)
@@ -420,9 +422,9 @@ def assistant_chat(req: ChatRequest) -> dict:
 
 @app.get("/api/assistant/status")
 def assistant_status() -> dict:
-    from skyops.assistant.agent import available
+    from skyops import assistant
 
-    return dict(available=available(), model=settings.assistant_model)
+    return assistant.status()
 
 
 # ----------------------------------------------------------------------------- static UI (must be last)

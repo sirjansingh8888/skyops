@@ -488,7 +488,7 @@ async function initAssistant() {
     const s = await api('/api/assistant/status'); state.assistant = s;
     $('#chip-assistant').textContent = s.available ? `assistant: ${s.model}` : 'assistant: offline (no API key)';
     $('#chip-assistant').className = 'chip ' + (s.available ? 'ok' : '');
-    $('#assist-model').textContent = s.available ? s.model : 'offline: set ANTHROPIC_API_KEY in .env';
+    $('#assist-model').textContent = s.available ? `${s.provider} · ${s.model}` : `offline: put ${s.key_env} in skyops/.env`;
   } catch (e) { /* ignore */ }
 }
 

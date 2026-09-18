@@ -9,7 +9,7 @@ drone operator or a UTM (unmanned traffic management) desk actually asks: **"Is 
 | Drone perception | AU-AIR frames with synced GPS / altitude / IMU; VisDrone-DET | YOLO detections of people and vehicles, geo-projected to the ground from the drone's telemetry, landing-zone GO / CAUTION / NO-GO |
 | Land use | Dubai aerial segmentation tiles (6 classes) | Surface segmentation and emergency-landing suitability |
 | Fleet health | NASA C-MAPSS turbofan run-to-failure | Remaining Useful Life per engine with p10–p90 band, grounding list |
-| Ops assistant | Claude (tool use over all layers) | Natural-language briefs: "Can I launch at the mission site now?" |
+| Ops assistant | Gemini free tier (function calling over all layers; Claude optional) | Natural-language briefs: "Can I launch at the mission site now?" |
 
 The mission brief combines airport zoning (DigitalSky-style red < 5 km, yellow < 12 km), the 120 m ceiling,
 low-level manned traffic, predicted intrusions, nearby conflicts/anomalies and (optionally) the camera and
@@ -35,7 +35,7 @@ Three sources feed the same pipeline:
 cd skyops
 .\scripts\setup.ps1            # creates .venv, installs CPU PyTorch + deps   (add -Cuda on the RTX laptop)
 .\.venv\Scripts\python.exe scripts\download_data.py --all      # ~700 MB: full small sets + VisDrone/AU-AIR subsets
-copy .env.example .env         # put ANTHROPIC_API_KEY in .env for the assistant (optional)
+copy .env.example .env         # put a free GEMINI_API_KEY in .env for the assistant (steps in HANDOFF.md)
 .\scripts\run.ps1              # http://127.0.0.1:8000  (API docs at /docs)
 ```
 
@@ -98,11 +98,13 @@ skyops/
   skyops/landuse/              data, infer (U-Net or colour rules), analyze, train
   skyops/fleet/                features, predict (LightGBM or k-NN fallback), train
   skyops/mission.py            the go / no-go risk brief
-  skyops/assistant/            Claude tool-use agent (tools.py, agent.py)
+  skyops/assistant/            provider-neutral tools (tools.py), Gemini agent (gemini_agent.py, default),
+                               optional Claude agent (agent.py), shared system prompt (prompts.py)
   skyops/api/main.py           FastAPI app + static UI
   web/                         console (MapLibre + deck.gl, vanilla JS)
   tests/test_smoke.py          pytest smoke tests
-  data/raw/                    datasets (git-ignored), models/ (git-ignored)
+  data/raw/                    datasets (git-ignored)
+  models/                      trained weights (committed; pretrained downloads and runs/ are ignored)
 ```
 
 ## API (selected)

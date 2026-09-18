@@ -133,6 +133,51 @@ def test_landuse():
     assert abs(sum(r["fractions"].values()) - 1) < 1e-3 and r["assessment"]["verdict"] in ("GO", "CAUTION", "NO-GO")
 
 
+def test_assistant_tool_declarations_and_dispatch():
+    import json
+
+    from skyops.assistant.tools import FUNCTIONS, declarations, run_tool
+
+    decls = declarations()
+    assert len(decls) == len(FUNCTIONS) and all(d["type"] == "function" and d["description"] for d in decls)
+    brief = next(d for d in decls if d["name"] == "mission_risk_brief")
+    assert brief["parameters"]["required"] == ["lat", "lon"]
+    assert brief["parameters"]["properties"]["alt_m"]["type"] == "number" and brief["parameters"]["properties"]["t_idx"]["type"] == "integer"
+    out = json.loads(run_tool("mission_risk_brief", {"lat": 12.97, "lon": 79.16, "t_idx": 5.0, "bogus": 1}))
+    assert out["verdict"] == "GO"
+    assert "error" in json.loads(run_tool("no_such_tool", {}))
+
+
+def test_gemini_function_calling_loop(monkeypatch):
+    """The stateless Interactions loop: a function_call step is executed and answered, then the text is returned."""
+    pytest.importorskip("google.genai")
+    from types import SimpleNamespace
+
+    from skyops.assistant import gemini_agent
+
+    calls = []
+
+    class FakeStep(SimpleNamespace):
+        def model_dump(self):
+            return {k: v for k, v in vars(self).items()}
+
+    class FakeInteractions:
+        def create(self, **kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                return SimpleNamespace(steps=[FakeStep(type="function_call", id="c1", name="airspace_overview", arguments={"t_idx": 3})], output_text=None)
+            assert kw["input"][-1]["type"] == "function_result" and kw["input"][-1]["call_id"] == "c1"
+            return SimpleNamespace(steps=[FakeStep(type="model_output", content=[{"type": "text", "text": "All quiet."}])], output_text="All quiet.")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    a = gemini_agent.GeminiAssistant()
+    a.client = SimpleNamespace(interactions=FakeInteractions())
+    r = a.ask("How busy is it?", t_idx=3)
+    assert r["answer"] == "All quiet." and r["tool_calls"][0]["name"] == "airspace_overview" and len(calls) == 2
+    assert calls[0]["store"] is False and calls[0]["tools"] and "SkyOps" in calls[0]["system_instruction"]
+    assert [s["type"] for s in a.history] == ["user_input", "function_call", "function_result", "model_output"]
+
+
 def test_api_roundtrip():
     from fastapi.testclient import TestClient
 
