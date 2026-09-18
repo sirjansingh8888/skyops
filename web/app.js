@@ -531,6 +531,11 @@ async function initAssistant() {
   } catch (e) { /* ignore */ }
 }
 
+function md(text) {
+  return esc(text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^\s*#{1,4}\s+(.+)$/gm, '<b>$1</b>')
+    .replace(/^(\s*)[*-]\s+/gm, '$1• ').replace(/`([^`]+)`/g, '<span class="mono">$1</span>');
+}
+
 function addMsg(kind, html) { const d = document.createElement('div'); d.className = `msg ${kind}`; d.innerHTML = html; $('#chat').appendChild(d); $('#chat').scrollTop = 1e9; return d; }
 
 async function sendChat(text) {
@@ -547,7 +552,7 @@ async function sendChat(text) {
   try {
     const r = await postJSON('/api/assistant/chat', { message: text, t_idx: state.t, context: ctx });
     if (r.error) { wait.className = 'msg err'; wait.textContent = r.error; return; }
-    wait.innerHTML = esc(r.answer || '(no answer)') + (r.tool_calls.length ? `<div class="tools">${r.tool_calls.map((t) => `<span>${esc(t.name)}</span>`).join('')}</div>` : '') + `<div class="hint">${r.model} · ${r.seconds}s</div>`;
+    wait.innerHTML = md(r.answer || '(no answer)') + (r.tool_calls.length ? `<div class="tools">${r.tool_calls.map((t) => `<span>${esc(t.name)}</span>`).join('')}</div>` : '') + `<div class="hint">${esc(r.provider || '')} · ${esc(r.model)} · ${r.seconds}s</div>`;
   } catch (e) { wait.className = 'msg err'; wait.textContent = e.message; }
 }
 

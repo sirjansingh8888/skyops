@@ -47,8 +47,11 @@ class Settings(BaseSettings):
     landuse_weights: str = "models/landuse_unet.pt"
     rul_model: str = "models/rul_lgbm.txt"
     assistant_provider: str = "gemini"        # "gemini" (free tier, default) or "claude"
-    gemini_model: str = "gemini-3.8-flash"
-    gemini_fallback_model: str = "gemini-3.5-flash-lite"  # used once when the main model returns 429 / 503
+    # Free-tier latency measured Sept 2026 on a two-round tool question: 3.6-flash ~10 s, 3.5-flash ~17 s,
+    # 3.5-flash-lite ~4 s (but sloppier with units); 3.7-flash and 3.8-flash were overloaded (timeouts, 90-160 s).
+    gemini_model: str = "gemini-3.6-flash"
+    gemini_fallback_model: str = "gemini-3.5-flash-lite"  # finishes the question after a timeout, 429 or 5xx
+    gemini_timeout_s: float = 25.0                         # hard cap per API call
     claude_model: str = "claude-opus-5"
     use_gru: bool = False                     # opt in to the GRU residual predictor (it did not beat dead reckoning)
     opensky_csv: str | None = None            # replay another recording (see scripts/record_opensky.py)

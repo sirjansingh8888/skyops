@@ -65,7 +65,7 @@ keys belong to a Google account and the free quota is per project, so sharing on
    ```
 
 3. Restart the server (`.\scripts\run.ps1`). The chip in the top bar turns green and reads
-   `assistant: gemini-3.8-flash`. You can also check http://127.0.0.1:8000/api/assistant/status.
+   `assistant: gemini-3.6-flash`. You can also check http://127.0.0.1:8000/api/assistant/status.
 
 `.env` is git-ignored. Never commit the key, paste it into chat, or put it in the README. If it leaks, delete it on
 the API keys page and create a new one.
@@ -77,8 +77,11 @@ the API keys page and create a new one.
   cannot be reached or the quota runs out during the demo.
 
 - Free-tier limits are per minute and per day and are shown in AI Studio (Dashboard, Usage and rate limits). One
-  question costs 2 to 4 requests because the assistant calls tools. If the limit is hit, the app retries once on
-  the lighter `gemini-3.5-flash-lite` model and otherwise asks you to wait a minute.
+  question costs 2 to 4 requests because the assistant calls tools.
+- Speed: we tested every free Flash model with a real tool question. `gemini-3.6-flash` answered in about 10 s and
+  is the default; `gemini-3.5-flash-lite` took about 4 s but made a unit mistake; the newest `gemini-3.7-flash` and
+  `gemini-3.8-flash` were overloaded on the free tier (timeouts, 90 to 160 s). Each call is capped at 25 s; after a
+  timeout or rate limit the question finishes on the lite model, and if that fails too, the offline rules answer.
 - Google may use free-tier prompts to improve its products, so do not paste private data.
 - Change the model with `SKYOPS_GEMINI_MODEL=...` in `.env` (any Flash or Flash-Lite model with a free tier on
   https://ai.google.dev/gemini-api/docs/pricing works).

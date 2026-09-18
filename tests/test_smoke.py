@@ -214,6 +214,34 @@ def test_offline_assistant_answers_from_tools(monkeypatch):
     assert a.ask("hello", t_idx=5)["tool_calls"][0]["name"] == "airspace_overview"
 
 
+def test_gemini_slow_model_falls_back_to_lite(monkeypatch):
+    """A timeout on the main model finishes the question on the fallback model instead of failing."""
+    pytest.importorskip("google.genai")
+    from types import SimpleNamespace
+
+    from skyops.assistant import gemini_agent
+
+    seen = []
+
+    class APITimeoutError(Exception):
+        pass
+
+    class Flaky:
+        def create(self, **kw):
+            seen.append(kw["model"])
+            if kw["model"] == "main-model":
+                raise APITimeoutError("Request timed out")
+            return SimpleNamespace(steps=[SimpleNamespace(type="model_output", model_dump=lambda: {"type": "model_output"})], output_text="Quiet skies.")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    a = gemini_agent.GeminiAssistant(model="main-model")
+    a.fallback_model = "lite-model"
+    a.client = SimpleNamespace(interactions=Flaky())
+    r = a.ask("How busy is it?", t_idx=3)
+    assert seen == ["main-model", "lite-model"] and r["model"] == "lite-model" and r["answer"] == "Quiet skies." and r["provider"] == "gemini"
+    assert all("timeout" in kw for kw in [dict(timeout=a.timeout_s)])
+
+
 def test_gemini_failure_falls_back_to_offline(monkeypatch):
     pytest.importorskip("google.genai")
     from types import SimpleNamespace
