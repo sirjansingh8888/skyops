@@ -23,6 +23,7 @@ const state = {
   conflictSet: new Set(), anomalySet: new Set(), intruderSet: new Set(), latest: null,
   live: { on: false, timer: null },
   mission: { site: null, result: null, picking: false },
+  route: { result: null, picking: false }, device: 'cpu', tour: { on: false },
   drone: { frames: [], idx: 0, result: null, playing: false, timer: null },
   landuse: { tiles: [], tile: null, mode: 'overlay', result: null },
   fleet: { subset: 'FD001', data: null, unit: null },
@@ -73,6 +74,11 @@ function tooltip({ object, layer }) {
 }
 
 function onMapClick(info) {
+  if (state.route.picking && info.coordinate) {
+    $('#r-lon').value = info.coordinate[0].toFixed(4); $('#r-lat').value = info.coordinate[1].toFixed(4);
+    state.route.picking = false; $('#r-pick').classList.remove('active');
+    planRoute(); return;
+  }
   if (state.mission.picking && info.coordinate) {
     $('#m-lon').value = info.coordinate[0].toFixed(4); $('#m-lat').value = info.coordinate[1].toFixed(4);
     state.mission.picking = false; $('#m-pick').classList.remove('active');
@@ -151,6 +157,17 @@ function buildLayers() {
       stroked: true, filled: false, getLineColor: [148, 163, 184, 140], lineWidthMinPixels: 1 }));
     layers.push(new deck.ScatterplotLayer({ id: 'mission-site', data: [site], getPosition: (d) => [d.lon, d.lat], getRadius: 6, radiusUnits: 'pixels', getFillColor: [34, 197, 94, 255],
       stroked: true, getLineColor: [255, 255, 255, 200], lineWidthMinPixels: 1 }));
+  }
+  const rt = state.route.result;
+  if (rt) {
+    const bad = rt.direct.red_zones.length || rt.direct.geofences.length;
+    layers.push(new deck.PathLayer({ id: 'route-direct', data: [rt.direct], getPath: (d) => d.path, getColor: bad ? [239, 68, 68, 200] : [148, 163, 184, 160], widthMinPixels: 2 }));
+    if (rt.planned) {
+      layers.push(new deck.PathLayer({ id: 'route-planned', data: [rt.planned], getPath: (d) => d.path, getColor: [34, 197, 94, 240], widthMinPixels: 4, capRounded: true, jointRounded: true }));
+      layers.push(new deck.ScatterplotLayer({ id: 'route-waypoints', data: rt.planned.path, getPosition: (d) => d, getRadius: 4, radiusUnits: 'pixels', getFillColor: [187, 247, 208, 255] }));
+    }
+    layers.push(new deck.ScatterplotLayer({ id: 'route-dest', data: [rt.end], getPosition: (d) => [d.lon, d.lat], getRadius: 7, radiusUnits: 'pixels', getFillColor: [250, 204, 21, 255],
+      stroked: true, getLineColor: [255, 255, 255, 220], lineWidthMinPixels: 1.5 }));
   }
   const dr = state.drone.result;
   if (dr) {
@@ -326,6 +343,25 @@ async function assessMission() {
   } catch (e) { el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
 }
 
+async function planRoute() {
+  setMissionSite(); const site = state.mission.site; if (!site) return;
+  const end_lat = parseFloat($('#r-lat').value), end_lon = parseFloat($('#r-lon').value);
+  if (Number.isNaN(end_lat) || Number.isNaN(end_lon)) return;
+  const el = $('#route-result'); el.innerHTML = 'Planning…';
+  try {
+    const r = await postJSON('/api/route/plan', { start_lat: site.lat, start_lon: site.lon, end_lat, end_lon, alt_m: site.alt_m,
+      speed_ms: parseFloat($('#r-speed').value) || 15, endurance_min: parseFloat($('#r-endurance').value) || 30, t_idx: state.live.on ? -1 : state.t });
+    state.route.result = r;
+    const p = r.planned;
+    el.innerHTML = `<div class="row"><span class="verdict ${r.verdict}">${r.verdict}</span><span class="muted">direct ${r.direct.length_km} km${p ? ` · planned ${p.length_km} km (+${p.detour_pct}%) · ${p.eta_min} min · battery ${p.battery_pct}% · ${p.waypoints} waypoints` : ''}</span></div>
+      <ul class="reasons">${r.reasons.map((x) => `<li class="${x.level}">${esc(x.text)}</li>`).join('')}</ul>`;
+    const pts = (p ? p.path : r.direct.path);
+    const lons = pts.map((q) => q[0]), lats = pts.map((q) => q[1]);
+    map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 90, maxZoom: 12, duration: 900 });
+    render();
+  } catch (e) { el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+}
+
 async function refreshAfterMissionChange() { state.gen += 1; state.snapshots = {}; await showSnapshot(state.live.on ? -1 : state.t); if (!state.live.on) { const gen = state.gen; (async () => { for (let i = 0; i < state.n && gen === state.gen; i++) await loadSnapshot(i); })(); } }
 
 async function registerMission() {
@@ -388,7 +424,8 @@ async function loadDroneFrame() {
 function playDrone(on) {
   state.drone.playing = on; $('#d-play').textContent = on ? '⏸ Pause' : '▶ Play flight';
   clearInterval(state.drone.timer);
-  if (on) state.drone.timer = setInterval(() => { state.drone.idx = (state.drone.idx + 2) % state.drone.frames.length; $('#d-slider').value = state.drone.idx; loadDroneFrame(); }, $('#d-gt').checked ? 500 : 1500);
+  const every = $('#d-gt').checked ? 400 : state.device === 'cuda' ? 450 : 1500;  // model inference is ~70 ms on a GPU, ~1 s on CPU
+  if (on) state.drone.timer = setInterval(() => { state.drone.idx = (state.drone.idx + 2) % state.drone.frames.length; $('#d-slider').value = state.drone.idx; loadDroneFrame(); }, every);
 }
 
 // ------------------------------------------------------------------ land use
@@ -529,9 +566,14 @@ function wire() {
   $('#m-pick').onclick = () => { state.mission.picking = !state.mission.picking; $('#m-pick').classList.toggle('active', state.mission.picking); };
   $('#m-assess').onclick = assessMission;
   $('#u-register').onclick = registerMission;
+  $('#r-plan').onclick = planRoute;
+  $('#r-pick').onclick = () => { state.route.picking = !state.route.picking; $('#r-pick').classList.toggle('active', state.route.picking); };
+  $('#r-clear').onclick = () => { state.route.result = null; $('#route-result').textContent = 'Route cleared.'; render(); };
+  $$('#tab-mission .presets .link[data-route]').forEach((b) => (b.onclick = () => { const [a, c, d, e] = b.dataset.route.split(','); $('#m-lat').value = a; $('#m-lon').value = c; $('#r-lat').value = d; $('#r-lon').value = e; setMissionSite(); planRoute(); }));
+  $('#btn-tour').onclick = () => (state.tour.on ? stopTour() : runTour());
   $('#u-clear').onclick = async () => { await api('/api/utm/missions', { method: 'DELETE' }); await refreshAfterMissionChange(); };
   ['#m-lat', '#m-lon', '#m-radius', '#m-alt'].forEach((s) => ($(s).onchange = setMissionSite));
-  $$('#tab-mission .presets .link').forEach((b) => (b.onclick = () => { const [la, lo] = b.dataset.site.split(','); $('#m-lat').value = la; $('#m-lon').value = lo; setMissionSite(); assessMission(); }));
+  $$('#tab-mission .presets .link[data-site]').forEach((b) => (b.onclick = () => { const [la, lo] = b.dataset.site.split(','); $('#m-lat').value = la; $('#m-lon').value = lo; setMissionSite(); assessMission(); }));
   $('#d-slider').oninput = (e) => { state.drone.idx = parseInt(e.target.value); loadDroneFrame(); };
   $('#d-play').onclick = () => playDrone(!state.drone.playing);
   ['#d-gt', '#d-relocate'].forEach((s) => ($(s).onchange = loadDroneFrame));
@@ -546,8 +588,33 @@ function wire() {
   $$('#tab-assistant .presets .link').forEach((b) => (b.onclick = () => { $('#chat-input').value = b.dataset.q; sendChat(b.dataset.q); }));
 }
 
+// ------------------------------------------------------------------ guided tour (hands-free demo)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function caption(html) { const c = $('#tour-caption'); c.innerHTML = html; c.classList.toggle('hidden', !html); }
+function stopTour() { state.tour.on = false; caption(''); $('#btn-tour').textContent = '▶ Tour'; $('#btn-tour').classList.remove('active'); }
+
+async function runTour() {
+  state.tour.on = true; $('#btn-tour').textContent = '■ Stop tour'; $('#btn-tour').classList.add('active');
+  const go = async (html, fn, ms = 6500) => { if (!state.tour.on) throw new Error('stopped'); caption(html); await fn(); await sleep(ms); if (!state.tour.on) throw new Error('stopped'); };
+  try {
+    await go('<b>1 · Airspace.</b> Real ADS-B traffic over India, replayed with 5-minute trajectory predictions and live separation checks.', async () => { switchTab('airspace'); await setScenario('combined'); map.flyTo({ center: [79.5, 20.5], zoom: 4.3 }); play(true); }, 7000);
+    await go('<b>2 · Conflict on cue.</b> Two simulated jets converge at FL360: the tower escalates from warning to alert to critical before separation is lost.', async () => { play(false); await showSnapshot(11); map.flyTo({ center: [78.0, 21.5], zoom: 6.6 }); });
+    await go('<b>3 · Emergency.</b> IGO721 squawks 7700 and descends at 4,900 ft/min: flagged critical, with the reason spelled out.', async () => { await showSnapshot(9); const a = state.latest.anomalies.find((x) => x.type === 'EMERGENCY_SQUAWK'); if (a) selectAircraft(a.icao24, true); });
+    await go('<b>4 · Can I fly here, now?</b> A launch near Delhi airport: NO-GO, with zoning, low-level traffic and predicted intrusions as reasons.', async () => { switchTab('mission'); $('#m-lat').value = '28.6100'; $('#m-lon').value = '77.0500'; await assessMission(); }, 7500);
+    await go('<b>5 · Route planning.</b> Dwarka to Vasant Kunj: the direct line crosses the IGI red zone, so the planner flies around it and reports the detour, flight time and battery.', async () => { $('#m-lat').value = '28.5921'; $('#m-lon').value = '77.0460'; $('#r-lat').value = '28.5200'; $('#r-lon').value = '77.1600'; await planRoute(); }, 8000);
+    await go('<b>6 · Drone camera.</b> A detector fine-tuned on VisDrone finds people and vehicles; the drone GPS, altitude and heading place them on the map and score the landing zone.', async () => { switchTab('drone'); playDrone(true); }, 8000);
+    await go('<b>7 · Land use.</b> A U-Net segments the ground below into water, buildings, roads and open land to rate emergency landing options.', async () => { playDrone(false); switchTab('landuse'); state.landuse.tile = state.landuse.tiles[10] || state.landuse.tile; $('#lu-tile').value = state.landuse.tile; await loadTile(); });
+    await go('<b>8 · Fleet health.</b> Remaining useful life per engine with a calibrated 80% band: a grounding list instead of a surprise failure.', async () => { switchTab('fleet'); if (!state.fleet.data) await loadFleet(); }, 7000);
+    await go('<b>9 · Evidence.</b> Every model reports how it was tested, including the experiment that did not beat the physics baseline.', async () => { switchTab('metrics'); if (!state.metrics) await loadMetrics(); }, 7000);
+  } catch (e) { /* stopped */ }
+  playDrone(false); state.route.result = null;
+  if (state.tour.on) { await setScenario('baseline'); switchTab('airspace'); map.flyTo({ center: [79.5, 20.5], zoom: 4.2 }); play(true); }
+  stopTour();
+}
+
 async function main() {
   wire();
+  api('/api/health').then((h) => { state.device = h.device; }).catch(() => {});
   await initMap();
   await initScenarios();
   const live = await api('/api/live/status').catch(() => ({ active: false }));

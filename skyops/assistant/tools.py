@@ -126,6 +126,32 @@ def mission_risk_brief(lat: float, lon: float, alt_m: float = 100.0, radius_km: 
     return _j(mission_risk(lat, lon, alt_m, radius_km, _t(t_idx)))
 
 
+def plan_drone_route(start_lat: float, start_lon: float, end_lat: float, end_lon: float, alt_m: float = 100.0,
+                     speed_ms: float = 15.0, endurance_min: float = 30.0, t_idx: int | None = None) -> str:
+    """Plan a drone corridor between two points that avoids airport red zones and active geofences and penalises
+    yellow zones and low-level manned traffic. Returns the verdict, direct vs planned distance, detour, flight time,
+    battery use and the reasons.
+
+    Args:
+        start_lat: Start latitude in decimal degrees.
+        start_lon: Start longitude in decimal degrees.
+        end_lat: Destination latitude in decimal degrees.
+        end_lon: Destination longitude in decimal degrees.
+        alt_m: Cruise altitude above ground in metres (routine ceiling is 120 m).
+        speed_ms: Cruise ground speed in metres per second.
+        endurance_min: Battery endurance in minutes.
+        t_idx: Snapshot index 0-19. Defaults to the latest snapshot.
+    """
+    from skyops.route import plan_route
+
+    r = plan_route(start_lat, start_lon, end_lat, end_lon, alt_m, speed_ms, endurance_min, _t(t_idx))
+    r["direct"].pop("path", None)
+    if r["planned"]:
+        wp = r["planned"].pop("path", [])
+        r["planned"]["waypoints_latlon"] = [[round(p[1], 4), round(p[0], 4)] for p in wp]
+    return _j(r)
+
+
 def geofence_status(t_idx: int | None = None) -> str:
     """Registered drone missions (geofences) and current intrusion alerts: manned aircraft inside a geofence or
     predicted to enter one, with time to entry. Also reports which airspace is active (recorded, scenario or live).
@@ -203,7 +229,7 @@ def landuse_assessment(tile: str | None = None) -> str:
     return _j(res)
 
 
-FUNCTIONS = [airspace_overview, list_conflicts, list_anomalies, aircraft_info, traffic_near, mission_risk_brief, geofence_status,
+FUNCTIONS = [airspace_overview, list_conflicts, list_anomalies, aircraft_info, traffic_near, mission_risk_brief, plan_drone_route, geofence_status,
              fleet_health, engine_detail, drone_camera_assessment, landuse_assessment]
 _BY_NAME = {f.__name__: f for f in FUNCTIONS}
 _JSON_TYPES = {int: "integer", float: "number", str: "string", bool: "boolean"}

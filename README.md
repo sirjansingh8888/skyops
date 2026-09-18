@@ -15,6 +15,11 @@ The mission brief combines airport zoning (DigitalSky-style red < 5 km, yellow <
 low-level manned traffic, predicted intrusions, nearby conflicts/anomalies and (optionally) the camera and
 land-use assessments into one score with reasons.
 
+The **route planner** turns that into navigation: given a start and a destination it runs A* over a local grid,
+treats airport red zones and other operators' geofences as obstacles, penalises yellow zones and low-level manned
+traffic, smooths the path, and reports the detour, flight time and battery use against the direct line
+(Delhi, Dwarka to Vasant Kunj: the direct line crosses the IGI red zone, the corridor goes around it for +32 %).
+
 On top of the layers sits a small **UTM desk**: register a flight as a geofence (the brief decides approved /
 approved-with-caution / rejected), and every tick checks manned traffic against all active geofences, raising
 `INTRUSION` and `PREDICTED_INTRUSION` alerts with time to entry.
@@ -28,6 +33,35 @@ Three sources feed the same pipeline:
 - **LIVE** — real-time ADS-B over India from the OpenSky REST API (anonymous access is rate-limited to roughly
   100 calls a day for this area; add an OpenSky API client in `.env` for ten times that).
   `scripts/record_opensky.py` records live traffic into the same CSV format for fresh replays and more training data.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Data["Organisers' data pack"]
+    OS[OpenSky ADS-B capture]
+    AU[AU-AIR frames + telemetry]
+    VD[VisDrone-DET]
+    DB[Dubai aerial tiles]
+    CM[NASA C-MAPSS]
+  end
+  LIVE[OpenSky live API] --> AIR
+  OS --> AIR[Airspace: replay, scenarios, live<br/>prediction, conflicts, anomalies]
+  VD --> YOLO[YOLO11s fine-tune]
+  AU --> PER[Perception: detect, geo-project,<br/>landing zone]
+  YOLO --> PER
+  DB --> LU[Land use: U-Net, landing suitability]
+  CM --> FL[Fleet: LightGBM RUL + conformal band]
+  AIR --> BRIEF[Mission brief<br/>GO / CAUTION / NO-GO]
+  PER --> BRIEF
+  LU --> BRIEF
+  AIR --> ROUTE[Route planner: A* around red zones and geofences]
+  BRIEF --> UTM[UTM desk: geofences, intrusion alerts]
+  ROUTE --> UTM
+  AIR & PER & LU & FL & BRIEF & ROUTE & UTM --> API[FastAPI]
+  API --> UI[Ops console: MapLibre + deck.gl]
+  API --> LLM[Assistant: Gemini function calling over the same tools]
+```
 
 ## Quick start (Windows, PowerShell)
 
@@ -107,6 +141,7 @@ skyops/
   skyops/landuse/              data, infer (U-Net or colour rules), analyze, train
   skyops/fleet/                features, predict (LightGBM or k-NN fallback), train
   skyops/mission.py            the go / no-go risk brief
+  skyops/route.py              A* route planner around red zones and geofences
   skyops/assistant/            provider-neutral tools (tools.py), Gemini agent (gemini_agent.py, default),
                                optional Claude agent (agent.py), shared system prompt (prompts.py)
   skyops/api/main.py           FastAPI app + static UI
@@ -121,11 +156,29 @@ skyops/
 `GET /api/airspace/snapshot/{t}` states + predicted paths + conflicts + anomalies + geofence alerts (`-1` = latest)
 · `GET /api/scenarios`, `POST /api/scenario` · `POST /api/live/start|stop`, `GET /api/live/status`
 · `GET|POST|DELETE /api/utm/missions` · `GET /api/metrics` · `GET /api/airspace/evaluate`
-· `POST /api/mission/brief` · `GET /api/fleet/{subset}` · `GET /api/drone/frame/{name}` (+`/image`)
+· `POST /api/mission/brief` · `POST /api/route/plan` · `GET /api/fleet/{subset}` · `GET /api/drone/frame/{name}` (+`/image`)
 · `POST /api/drone/detect` (upload) · `GET /api/landuse/tile/{name}` (+`/image?mode=overlay|mask|gt`)
 · `POST /api/landuse/segment` (upload) · `POST /api/assistant/chat`. Full docs at `/docs`.
 
+## Sharing a running demo
+
+The quickest way to give judges a URL is a tunnel to the laptop that has the GPU and the data:
+
+```powershell
+winget install --id Cloudflare.cloudflared      # once
+cloudflared tunnel --url http://localhost:8000  # prints a public https URL while it runs
+```
+
+Anyone with that URL can drive the console and spend your assistant quota, so stop the tunnel after the demo.
+(These two commands are the documented Cloudflare quick-tunnel usage; they have not been run on the development laptop.)
+
+A `Dockerfile` (CPU inference, about 3 GB) is included for a hosted deployment. It has been written but not
+built yet, because Docker is not installed on the development laptop; treat it as a starting point.
+
 ## Demo script (3 minutes)
+
+Press **Tour** in the top bar for a hands-free walkthrough of all nine steps with captions (about 70 seconds),
+or follow [PITCH.md](PITCH.md), which also has the numbers to quote and answers to likely judge questions.
 
 1. Press play: aircraft move over India, predicted paths and separation conflicts appear (alert BDA354 / GFA130
    converging near Delhi), anomalies list explains itself. Switch the scenario selector to `combined`: DEMO01 /

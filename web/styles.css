@@ -92,6 +92,8 @@ svg.chart text { fill: var(--muted); font-size: 10px; }
 .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .maplibregl-ctrl-attrib { font-size: 10px; }
 .hidden { display: none !important; }
+.tour-caption { position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%); z-index: 50; max-width: 720px; background: rgba(8, 47, 73, .95); border: 1px solid var(--cyan); color: #e0f2fe; padding: 12px 18px; border-radius: 12px; font-size: 15px; box-shadow: 0 8px 30px rgba(0, 0, 0, .5); }
+.tour-caption b { color: #7dd3fc; }
 .badge.sim { background: #581c87; color: #e9d5ff; }
 .replay select { width: auto; max-width: 190px; padding: 6px 8px; }
 .btn.live { background: #7f1d1d; border-color: var(--red); color: #fecaca; animation: pulse 1.6s infinite; }

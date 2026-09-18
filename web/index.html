@@ -19,6 +19,7 @@
   </div>
   <div class="replay">
     <select id="scenario" title="Demo scenario (simulated events are labelled)"></select>
+    <button id="btn-tour" class="btn" title="Hands-free walkthrough of every feature">▶ Tour</button>
     <button id="btn-live" class="btn" title="Live ADS-B from the OpenSky Network">● LIVE</button>
     <button id="btn-play" class="btn primary">▶ Play</button>
     <input type="range" id="slider" min="0" max="19" value="0"/>
@@ -33,7 +34,7 @@
     <div><i style="background:#c084fc"></i>simulated aircraft (scenario)</div>
     <div><i style="background:#ef4444"></i>loss of separation / intrusion</div>
     <div><i style="background:#f59e0b"></i>predicted conflict / anomaly</div>
-    <div><i style="background:#22c55e"></i>mission site · geofence · drone</div>
+    <div><i style="background:#22c55e"></i>mission site · geofence · drone · planned route</div>
     <div><i style="background:#a78bfa"></i>airport 5 / 12 km zones</div>
   </div>
 
@@ -94,6 +95,27 @@
         </div>
       </div>
       <div class="card" id="mission-result"><div class="muted">No assessment yet.</div></div>
+      <div class="card">
+        <div class="card-title">Route planner <span class="muted">start = the site above</span></div>
+        <div class="grid2">
+          <label>Destination latitude <input id="r-lat" type="number" step="0.0001" value="28.5200"/></label>
+          <label>Destination longitude <input id="r-lon" type="number" step="0.0001" value="77.1600"/></label>
+          <label>Cruise speed (m/s) <input id="r-speed" type="number" value="15"/></label>
+          <label>Endurance (min) <input id="r-endurance" type="number" value="30"/></label>
+        </div>
+        <div class="row">
+          <button id="r-pick" class="btn">🏁 Pick destination</button>
+          <button id="r-plan" class="btn primary">Plan route</button>
+          <button id="r-clear" class="btn">Clear</button>
+        </div>
+        <div class="row small presets">
+          <span class="muted">Demo routes:</span>
+          <button class="link" data-route="28.5921,77.0460,28.5200,77.1600">Delhi: Dwarka → Vasant Kunj</button>
+          <button class="link" data-route="12.9692,79.1559,12.9249,79.1353">Vellore: VIT → CMC</button>
+          <button class="link" data-route="12.9249,80.1000,13.0100,80.2200">Chennai: Tambaram → Guindy</button>
+        </div>
+        <div id="route-result" class="hint">Plans a corridor around airport red zones and active geofences, penalises yellow zones and low-level traffic, and compares it with the direct line.</div>
+      </div>
       <div class="card">
         <div class="card-title">UTM desk: register the flight <span class="badge" id="missions-count">0</span></div>
         <div class="grid2">
@@ -193,6 +215,7 @@
   </aside>
 </main>
 
+<div id="tour-caption" class="tour-caption hidden"></div>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/deck.min.js"></script>
 <script src="app.js"></script>

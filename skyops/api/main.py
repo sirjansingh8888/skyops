@@ -191,6 +191,25 @@ def mission_brief(req: MissionRequest) -> dict:
     return out
 
 
+class RouteRequest(BaseModel):
+    start_lat: float
+    start_lon: float
+    end_lat: float
+    end_lon: float
+    alt_m: float = Field(100.0, gt=0, le=1000)
+    speed_ms: float = Field(15.0, gt=1, le=60)
+    endurance_min: float = Field(30.0, gt=1, le=600)
+    t_idx: int | None = None
+
+
+@app.post("/api/route/plan")
+def route_plan(req: RouteRequest) -> dict:
+    """Plan a drone corridor that avoids red zones and active geofences; compares it with the direct line."""
+    from skyops.route import plan_route
+
+    return plan_route(req.start_lat, req.start_lon, req.end_lat, req.end_lon, req.alt_m, req.speed_ms, req.endurance_min, req.t_idx)
+
+
 class RegisterRequest(BaseModel):
     name: str = ""
     lat: float

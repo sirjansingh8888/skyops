@@ -92,6 +92,28 @@ def test_utm_geofence_alerts(tmp_path, monkeypatch, airspace):
     assert utm.remove_mission(m["id"]) and utm.remove_mission(far["id"])
 
 
+def test_route_planner_detours_and_verdicts(tmp_path, monkeypatch, airspace):
+    from skyops import utm
+    from skyops.route import RED_ZONE_KM, plan_route
+    from skyops.airspace.airports import AIRPORTS, haversine_km
+
+    monkeypatch.setattr(utm, "_STORE", tmp_path / "missions.json")
+    monkeypatch.setattr(utm, "_MISSIONS", None)
+    delhi = next(a for a in AIRPORTS if a["icao"] == "VIDP")
+    r = plan_route(28.5921, 77.0460, 28.5200, 77.1600, t_idx=5, airspace=airspace)  # direct line crosses the IGI red zone
+    assert r["direct"]["red_zones"] and r["planned"] and not r["planned"]["red_zones"] and r["planned"]["detour_pct"] > 5
+    assert all(haversine_km(lat, lon, delhi["lat"], delhi["lon"]) > RED_ZONE_KM for lon, lat in r["planned"]["path"])
+    clear = plan_route(12.9692, 79.1559, 12.9249, 79.1353, t_idx=5, airspace=airspace)
+    assert clear["verdict"] == "GO" and clear["planned"]["waypoints"] == 2 and clear["planned"]["detour_pct"] < 1
+    assert plan_route(19.20, 72.97, 19.0896, 72.8656, t_idx=5, airspace=airspace)["verdict"] == "NO-GO"  # destination in a red zone
+    far = plan_route(12.9692, 79.1559, 12.60, 79.60, endurance_min=20, t_idx=5, airspace=airspace)
+    assert far["verdict"] == "NO-GO" and far["planned"]["battery_pct"] > 100
+    # another operator's geofence on the direct line forces a detour
+    utm.register_mission("block", 12.947, 79.1456, radius_km=0.8, ceiling_m=100, t_idx=5)
+    fenced = plan_route(12.9692, 79.1559, 12.9249, 79.1353, t_idx=5, airspace=airspace)
+    assert fenced["direct"]["geofences"] == ["block"] and not fenced["planned"]["geofences"] and fenced["planned"]["detour_pct"] > 1
+
+
 def test_gru_pipeline_shapes(airspace):
     """The learned-predictor code path works end to end with untrained weights (no training here)."""
     torch = pytest.importorskip("torch")
