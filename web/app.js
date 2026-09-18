@@ -275,6 +275,7 @@ async function initScenarios() {
 
 async function setScenario(name) {
   if (state.live.on) await setLive(false, true);
+  $('#scenario').value = name;
   await postJSON('/api/scenario', { name });
   await resetReplay(true);
 }
